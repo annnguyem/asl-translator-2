@@ -1,41 +1,27 @@
 import os
-import io
 import string
 import base64
-import zipfile
 import traceback
-import glob
-import gdown
+import requests
 import uuid
 import multiprocessing
-import moviepy
-import subprocess
 
-from moviepy.video.io.VideoFileClip import VideoFileClip
-from pydantic import BaseModel
-from fastapi import Query
-from fastapi import FastAPI
+from fastapi import Query, FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from time import time, sleep
+from pydantic import BaseModel
+from time import time
 from worker import process_audio_worker
 
 multiprocessing.set_start_method("spawn", force=True)
 
-# 🔠 Constants
+# Directory to store temporary audio files
 STATIC_DIR = "static_output"
-
-# In-memory job status storage
-manager = multiprocessing.Manager()
-video_jobs = manager.dict()
-
-# ✅ Make sure static dir exists BEFORE mounting
 os.makedirs(STATIC_DIR, exist_ok=True)
 
-# 🚀 FastAPI app setup
+# FastAPI app setup
 app = FastAPI()
-ASSEMBLYAI_API_KEY = '2b791d89824a4d5d8eeb7e310aa6542f'
+ASSEMBLYAI_API_KEY = 'your_assemblyai_key_here'
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,46 +31,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+# In-memory job status storage
+manager = multiprocessing.Manager()
+video_jobs = manager.dict()
 
-# ⬇️ Download + Extract Videos from Google Drive
-def download_and_extract_videos():
-    if os.path.exists(ASL_VIDEO_DIR):
-        print("📂 Video database already exists. Skipping download.")
-        return
-
-    print("⬇️ Downloading ASL video database from Google Drive...")
-    url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
-    gdown.download(url, ZIP_FILENAME, quiet=False)
-
-    with zipfile.ZipFile(ZIP_FILENAME, 'r') as zip_ref:
-        zip_ref.extractall()
-
-    os.remove(ZIP_FILENAME)
-    print("✅ Extracted video database to:", ASL_VIDEO_DIR)
-
-def clean_temp_files():
-    print("🪩 Cleaning up old files...")
-    for pattern in ["temp_*.mp3"]:
-        for file in glob.glob(pattern):
-            try:
-                os.remove(file)
-                print(f"🗑️ Removed {file}")
-            except Exception as e:
-                print(f"⚠️ Failed to remove {file}: {e}")
-    for file in glob.glob(os.path.join(STATIC_DIR, "output_*.mp4")):
-        try:
-            os.remove(file)
-            print(f"🗑️ Removed {file}")
-        except Exception as e:
-            print(f"⚠️ Failed to remove {file}: {e}")
-
-@app.on_event("startup")
-def startup_event():
-    clean_temp_files()
-    download_and_extract_videos()
-
-# 🔤 Utilities
+# Utility functions
 def strip_punctuation(text):
     return text.translate(str.maketrans("", "", string.punctuation)).lower()
 
@@ -115,49 +66,13 @@ def translate_text_to_sign(sentence):
                     urls.append(letter_url)
     return urls
 
-def generate_merged_video(video_paths, output_path):
-    try:
-        if not video_paths:
-            raise ValueError("No video paths provided")
-
-        input_args = []
-        filter_parts = []
-        for idx, path in enumerate(video_paths):
-            input_args += ["-i", path]
-            filter_parts.append(f"[{idx}:v]scale=640:360,fps=30[v{idx}]")
-
-        filter_complex = "; ".join(filter_parts)
-        concat_inputs = "".join(f"[v{idx}]" for idx in range(len(video_paths)))
-        filter_complex += f"; {concat_inputs}concat=n={len(video_paths)}:v=1:a=0[outv]"
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            *input_args,
-            "-filter_complex", filter_complex,
-            "-map", "[outv]",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "23",
-            output_path
-        ]
-
-        subprocess.run(cmd, check=True)
-        print(f"✅ Merged video created at {output_path}")
-
-    except subprocess.CalledProcessError as e:
-        print(f"❌ ffmpeg failed: {e}")
-        raise
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        raise
-
-# 📅 Base64 audio endpoint
+# API Models
 class AudioPayload(BaseModel):
     filename: str
     content_base64: str
 
-@app.post("/translate_audio/", status_code=200)
+# POST audio endpoint
+@app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
     job_id = str(uuid.uuid4())
     video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
@@ -178,6 +93,7 @@ async def translate_audio(data: AudioPayload):
 
     return {"job_id": job_id}
 
+# GET job status
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
     if job_id in video_jobs:
@@ -189,7 +105,7 @@ def video_status(job_id: str):
         }
     return {"status": "not_found"}
 
+# Health check
 @app.get("/")
 def health_check():
-    print("✅ Health check OK")
     return {"status": "ok"}
