@@ -24,10 +24,7 @@ from worker import process_audio_worker
 multiprocessing.set_start_method("spawn", force=True)
 
 # 🔠 Constants
-ASL_VIDEO_DIR = "videos_database"
 STATIC_DIR = "static_output"
-GDRIVE_FILE_ID = "1T2A6VjUbmozDtoXecq9-e2e3wSjY7czu"
-ZIP_FILENAME = "asl_videos.zip"
 
 # In-memory job status storage
 manager = multiprocessing.Manager()
@@ -91,26 +88,32 @@ def startup_event():
 def strip_punctuation(text):
     return text.translate(str.maketrans("", "", string.punctuation)).lower()
 
-def get_asl_video_path(word):
-    file_name = f"{word}.mp4"
-    file_path = os.path.join(ASL_VIDEO_DIR, file_name)
-    return file_path if os.path.isfile(file_path) else None
+def get_asl_video_url(word):
+    try:
+        response = requests.get(f"https://signasl.org/api/sign/{word}")
+        response.raise_for_status()
+        results = response.json()
+        if results and isinstance(results, list):
+            return results[0].get("video_url")
+    except Exception as e:
+        print(f"❌ Failed to get video for '{word}': {e}")
+    return None
 
 def translate_text_to_sign(sentence):
     clean_sentence = strip_punctuation(sentence)
     words = clean_sentence.split()
 
-    asl_video_paths = []
+    urls = []
     for word in words:
-        video_path = get_asl_video_path(word)
-        if video_path:
-            asl_video_paths.append(video_path)
+        url = get_asl_video_url(word)
+        if url:
+            urls.append(url)
         else:
             for letter in word:
-                letter_path = get_asl_video_path(letter)
-                if letter_path:
-                    asl_video_paths.append(letter_path)
-    return asl_video_paths
+                letter_url = get_asl_video_url(letter)
+                if letter_url:
+                    urls.append(letter_url)
+    return urls
 
 def generate_merged_video(video_paths, output_path):
     try:
@@ -157,19 +160,19 @@ class AudioPayload(BaseModel):
 @app.post("/translate_audio/", status_code=200)
 async def translate_audio(data: AudioPayload):
     job_id = str(uuid.uuid4())
-    video_jobs[job_id] = {"status": "processing", "path": None}
+    video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
 
     temp_audio_path = f"temp_{data.filename}"
     audio_bytes = base64.b64decode(data.content_base64)
     with open(temp_audio_path, "wb") as f:
         f.write(audio_bytes)
 
-    print(f"📥 Received file {data.filename}, base64 length: {len(data.content_base64)}")
+    print(f"📥 Received audio file: {data.filename}")
 
     import threading
     threading.Thread(
         target=process_audio_worker,
-        args=(job_id, temp_audio_path, video_jobs, STATIC_DIR, translate_text_to_sign, generate_merged_video),
+        args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign),
         daemon=True
     ).start()
 
@@ -177,34 +180,14 @@ async def translate_audio(data: AudioPayload):
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
-    video_path = os.path.join(STATIC_DIR, f"output_{job_id}.mp4")
-    done_path = video_path.replace(".mp4", ".done")
-
-    if os.path.exists(done_path):
-        url = f"/static/output_{job_id}.mp4?t={int(time())}"
+    if job_id in video_jobs:
+        job = video_jobs[job_id]
         return {
-            "status": "ready",
-            "video_url": url,
-            "transcript": video_jobs[job_id].get("transcript", "")
+            "status": job["status"],
+            "video_urls": job.get("video_urls", []),
+            "transcript": job.get("transcript", "")
         }
-    elif os.path.exists(video_path):
-        return {"status": "processing"}
-    else:
-        return {"status": "not_found"}
-
-@app.get("/translated_text")
-def translated_text(sentence: str = Query(...)):
-    clean_sentence = strip_punctuation(sentence)
-    words = clean_sentence.split()
-
-    translated = []
-    for word in words:
-        if get_asl_video_path(word):
-            translated.append(word)
-        else:
-            translated += [letter for letter in word if get_asl_video_path(letter)]
-
-    return {"translated": translated}
+    return {"status": "not_found"}
 
 @app.get("/")
 def health_check():
