@@ -85,7 +85,7 @@ def translate_text_to_sign(sentence):
 def generate_merged_video(video_urls, word_timestamps, output_path):
     """
     video_urls: list of URLs of ASL video clips for each word/letter
-    word_timestamps: list of dicts with 'start' and 'end' times for each word (seconds)
+    word_timestamps: list of dicts with 'start' and 'end' times for each word (milliseconds from AssemblyAI)
     output_path: final output mp4 path
 
     This function downloads the clips, adjusts playback speed to match word duration,
@@ -97,15 +97,20 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
     try:
         clips = []
 
-        # Defensive: word_timestamps may be shorter or longer than video_urls
+        print(f"ℹ️ generate_merged_video called with {len(video_urls)} video URLs and {len(word_timestamps)} word timestamps")
+
         length = min(len(video_urls), len(word_timestamps))
 
         for i in range(length):
             url = video_urls[i]
             word_info = word_timestamps[i]
-            start = word_info.get("start", 0)
-            end = word_info.get("end", 0)
-            duration = max(end - start, 0.1)  # minimum duration 0.1 sec to avoid issues
+
+            # Convert timestamps from ms to seconds
+            start = word_info.get("start", 0) / 1000.0
+            end = word_info.get("end", 0) / 1000.0
+            duration = max(end - start, 0.1)  # minimum duration 0.1 sec
+
+            print(f"🔹 Word {i}: start={start:.3f}s, end={end:.3f}s, duration={duration:.3f}s")
 
             # Download video clip to a temp file
             response = requests.get(url, stream=True)
@@ -117,22 +122,29 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
 
             clip = mp.VideoFileClip(tmp_file.name)
 
-            # Adjust playback speed to match the duration of the spoken word
             clip_duration = clip.duration
             speed_factor = clip_duration / duration if duration > 0 else 1
+
+            print(f"    Original clip duration: {clip_duration:.3f}s, speed_factor: {speed_factor:.3f}")
 
             adjusted_clip = clip.fx(mp.vfx.speedx, speed_factor)
 
             clips.append(adjusted_clip)
 
-        # Concatenate all clips
+        print(f"ℹ️ Concatenating {len(clips)} clips...")
         final_clip = mp.concatenate_videoclips(clips, method="compose")
-        final_clip.write_videofile(output_path, codec="libx264", audio=False, verbose=False, logger=None)
 
-        # Cleanup temp clip files
+        print(f"ℹ️ Writing final video to {output_path}...")
+        final_clip.write_videofile(output_path, codec="libx264", audio=False, verbose=True)
+
         for clip in clips:
             clip.close()
-            os.unlink(clip.filename)
+            try:
+                os.unlink(clip.filename)
+            except Exception as e:
+                print(f"⚠️ Could not delete temp clip file {clip.filename}: {e}")
+
+        print(f"✅ Merged video created at {output_path}")
 
     except Exception as e:
         print(f"❌ Failed to merge videos with timing: {e}")
