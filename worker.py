@@ -35,15 +35,21 @@ def transcribe_with_assemblyai(audio_path):
             raise Exception(f"AssemblyAI error: {polling.json()['error']}")
         time.sleep(3)
 
-def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign):
+def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign, generate_merged_video, static_dir):
     try:
         print(f"🎬 [{job_id}] Transcribing with AssemblyAI...")
         transcript = transcribe_with_assemblyai(audio_path)
         print(f"🗣️ Transcript: {transcript}")
 
+        # 🔗 Translate to ASL video URLs
         video_urls = translate_text_to_sign(transcript)
         print(f"🔗 Found {len(video_urls)} ASL video URLs.")
 
+        # 📹 Merge the ASL videos into one output file
+        output_path = os.path.join(static_dir, f"output_{job_id}.mp4")
+        generate_merged_video(video_urls, output_path)
+
+        # 🧠 Store job result
         video_jobs[job_id] = {
             "status": "ready",
             "video_urls": video_urls,
