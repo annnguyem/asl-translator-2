@@ -45,7 +45,7 @@ def clean_temp_files():
         try:
             os.remove(f)
         except Exception as e:
-            print(f"⚠️ Could not delete {f}: {e}")
+            print(f"⚠️ Could not delete {f}: {e}", flush=True)
 
 @app.on_event("startup")
 def startup_event():
@@ -63,7 +63,7 @@ def get_asl_video_url(word):
         if results and isinstance(results, list):
             return results[0].get("video_url")
     except Exception as e:
-        print(f"❌ Failed to get video for '{word}': {e}")
+        print(f"❌ Failed to get video for '{word}': {e}", flush=True)
     return None
 
 def translate_text_to_sign(sentence):
@@ -97,7 +97,7 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
     try:
         clips = []
 
-        print(f"ℹ️ generate_merged_video called with {len(video_urls)} video URLs and {len(word_timestamps)} word timestamps")
+        print(f"ℹ️ generate_merged_video called with {len(video_urls)} video URLs and {len(word_timestamps)} word timestamps", flush=True)
 
         length = min(len(video_urls), len(word_timestamps))
 
@@ -110,7 +110,7 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
             end = word_info.get("end", 0) / 1000.0
             duration = max(end - start, 0.1)  # minimum duration 0.1 sec
 
-            print(f"🔹 Word {i}: start={start:.3f}s, end={end:.3f}s, duration={duration:.3f}s")
+            print(f"🔹 Word {i}: start={start:.3f}s, end={end:.3f}s, duration={duration:.3f}s", flush=True)
 
             # Download video clip to a temp file
             response = requests.get(url, stream=True)
@@ -125,16 +125,16 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
             clip_duration = clip.duration
             speed_factor = clip_duration / duration if duration > 0 else 1
 
-            print(f"    Original clip duration: {clip_duration:.3f}s, speed_factor: {speed_factor:.3f}")
+            print(f"    Original clip duration: {clip_duration:.3f}s, speed_factor: {speed_factor:.3f}", flush=True)
 
             adjusted_clip = clip.fx(mp.vfx.speedx, speed_factor)
 
             clips.append(adjusted_clip)
 
-        print(f"ℹ️ Concatenating {len(clips)} clips...")
+        print(f"ℹ️ Concatenating {len(clips)} clips...", flush=True)
         final_clip = mp.concatenate_videoclips(clips, method="compose")
 
-        print(f"ℹ️ Writing final video to {output_path}...")
+        print(f"ℹ️ Writing final video to {output_path}...", flush=True)
         final_clip.write_videofile(output_path, codec="libx264", audio=False, verbose=True)
 
         for clip in clips:
@@ -142,12 +142,12 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
             try:
                 os.unlink(clip.filename)
             except Exception as e:
-                print(f"⚠️ Could not delete temp clip file {clip.filename}: {e}")
+                print(f"⚠️ Could not delete temp clip file {clip.filename}: {e}", flush=True)
 
-        print(f"✅ Merged video created at {output_path}")
+        print(f"✅ Merged video created at {output_path}", flush=True)
 
     except Exception as e:
-        print(f"❌ Failed to merge videos with timing: {e}")
+        print(f"❌ Failed to merge videos with timing: {e}", flush=True)
         raise
 
 # 🎙️ API Models
