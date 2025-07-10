@@ -8,6 +8,7 @@ ASSEMBLYAI_API_KEY = "your_assemblyai_key_here"
 def transcribe_with_assemblyai(audio_path):
     headers = {'authorization': ASSEMBLYAI_API_KEY}
 
+    print(f"⏳ Uploading audio for transcription: {audio_path}")
     with open(audio_path, 'rb') as f:
         response = requests.post(
             'https://api.assemblyai.com/v2/upload',
@@ -16,6 +17,7 @@ def transcribe_with_assemblyai(audio_path):
         )
     response.raise_for_status()
     upload_url = response.json()['upload_url']
+    print(f"✅ Uploaded audio. Upload URL: {upload_url}")
 
     # Request transcript with word-level timestamps
     transcript_request = {
@@ -26,6 +28,7 @@ def transcribe_with_assemblyai(audio_path):
         'word_timestamps': True  # <-- Enable word timestamps
     }
 
+    print("⏳ Requesting transcript with word timestamps...")
     transcript_response = requests.post(
         'https://api.assemblyai.com/v2/transcript',
         json=transcript_request,
@@ -33,13 +36,17 @@ def transcribe_with_assemblyai(audio_path):
     )
     transcript_response.raise_for_status()
     transcript_id = transcript_response.json()['id']
+    print(f"✅ Transcript requested. Transcript ID: {transcript_id}")
 
+    # Polling for transcript completion
     while True:
         polling = requests.get(f'https://api.assemblyai.com/v2/transcript/{transcript_id}', headers=headers)
         polling.raise_for_status()
         data = polling.json()
         status = data['status']
+        print(f"🔄 Polling transcription status: {status}")
         if status == 'completed':
+            print("✅ Transcription completed.")
             return data  # return full transcript JSON with words
         elif status == 'error':
             raise Exception(f"AssemblyAI error: {data['error']}")
@@ -48,20 +55,28 @@ def transcribe_with_assemblyai(audio_path):
 
 def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign, generate_merged_video, static_dir):
     try:
-        print(f"🎬 [{job_id}] Transcribing with AssemblyAI...")
+        print(f"🎬 [{job_id}] Starting transcription and video generation workflow...")
         transcript_data = transcribe_with_assemblyai(audio_path)
 
         transcript = transcript_data.get('text', '')
         words = transcript_data.get('words', [])
-        print(f"🗣️ Transcript: {transcript}")
-        print(f"🕒 Words with timestamps: {words}")
+        print(f"🗣️ Transcript text: {transcript}")
+        print(f"🕒 Word timestamps received: {len(words)} words")
 
-        # Translate transcript text into ASL video paths or URLs
+        # Log first few words with timestamps for sanity check
+        for w in words[:5]:
+            start_ms = w.get('start', 'N/A')
+            end_ms = w.get('end', 'N/A')
+            word_text = w.get('text', '')
+            print(f"   Word: '{word_text}' start: {start_ms}ms end: {end_ms}ms")
+
+        # Translate transcript text into ASL video URLs
         video_urls = translate_text_to_sign(transcript)
-        print(f"🔗 Found {len(video_urls)} ASL video URLs.")
+        print(f"🔗 Retrieved {len(video_urls)} ASL video URLs for translation.")
 
-        # Generate the merged video with timing
+        # Generate merged video with timing adjustment
         output_path = os.path.join(static_dir, f"output_{job_id}.mp4")
+        print(f"🎥 Generating merged video at: {output_path}")
         generate_merged_video(video_urls, words, output_path)
 
         video_jobs[job_id] = {
@@ -69,7 +84,7 @@ def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign,
             "video_urls": video_urls,
             "transcript": transcript
         }
+        print(f"✅ Job [{job_id}] completed successfully.")
 
     except Exception:
-        traceback.print_exc()
-        video_jobs[job_id]["status"] = "error"
+        print(f"❌ Error occurred during processing job [{job_id}]:")
