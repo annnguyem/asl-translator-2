@@ -82,23 +82,60 @@ def translate_text_to_sign(sentence):
                     urls.append(letter_url)
     return urls
 
-def generate_merged_video(video_urls, output_path):
-    try:
-        input_txt = "input.txt"
-        with open(input_txt, "w") as f:
-            for url in video_urls:
-                filename = url.split("/")[-1]
-                local_path = os.path.join(STATIC_DIR, filename)
-                with open(local_path, "wb") as vid_file:
-                    vid_file.write(requests.get(url).content)
-                f.write(f"file '{local_path}'\n")
+def generate_merged_video(video_urls, word_timestamps, output_path):
+    """
+    video_urls: list of URLs of ASL video clips for each word/letter
+    word_timestamps: list of dicts with 'start' and 'end' times for each word (seconds)
+    output_path: final output mp4 path
 
-        cmd = ["ffmpeg", "-f", "concat", "-safe", "0", "-i", input_txt, "-c", "copy", output_path]
-        subprocess.run(cmd, check=True)
-        os.remove(input_txt)
+    This function downloads the clips, adjusts playback speed to match word duration,
+    then concatenates all clips into one final video.
+    """
+    import moviepy.editor as mp
+    import tempfile
+
+    try:
+        clips = []
+
+        # Defensive: word_timestamps may be shorter or longer than video_urls
+        length = min(len(video_urls), len(word_timestamps))
+
+        for i in range(length):
+            url = video_urls[i]
+            word_info = word_timestamps[i]
+            start = word_info.get("start", 0)
+            end = word_info.get("end", 0)
+            duration = max(end - start, 0.1)  # minimum duration 0.1 sec to avoid issues
+
+            # Download video clip to a temp file
+            response = requests.get(url, stream=True)
+            if response.status_code != 200:
+                raise Exception(f"Failed to download video from {url}")
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tmp_file.write(response.content)
+            tmp_file.close()
+
+            clip = mp.VideoFileClip(tmp_file.name)
+
+            # Adjust playback speed to match the duration of the spoken word
+            clip_duration = clip.duration
+            speed_factor = clip_duration / duration if duration > 0 else 1
+
+            adjusted_clip = clip.fx(mp.vfx.speedx, speed_factor)
+
+            clips.append(adjusted_clip)
+
+        # Concatenate all clips
+        final_clip = mp.concatenate_videoclips(clips, method="compose")
+        final_clip.write_videofile(output_path, codec="libx264", audio=False, verbose=False, logger=None)
+
+        # Cleanup temp clip files
+        for clip in clips:
+            clip.close()
+            os.unlink(clip.filename)
 
     except Exception as e:
-        print(f"❌ Failed to merge videos: {e}")
+        print(f"❌ Failed to merge videos with timing: {e}")
         raise
 
 # 🎙️ API Models
