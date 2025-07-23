@@ -126,7 +126,8 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
 
             logging.info(f"    Original clip duration: {clip_duration:.3f}s, speed_factor: {speed_factor:.3f}")
 
-            adjusted_clip = clip.fx(mp.vfx.speedx, speed_factor)
+            clip = mp.VideoFileClip(tmp_file.name).without_audio()
+            adjusted_clip = clip.set_duration(duration)
             clips.append(adjusted_clip)
 
         logging.info(f"ℹ️ Concatenating {len(clips)} clips...")
