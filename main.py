@@ -96,7 +96,7 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
     import moviepy.editor as mp
     import tempfile
 
-  try:
+    try:
         clips = []
 
         logging.info(f"ℹ️ generate_merged_video called with {len(video_urls)} video URLs and {len(word_timestamps)} word timestamps")
