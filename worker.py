@@ -10,7 +10,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-ASSEMBLYAI_API_KEY = "your_assemblyai_key_here"
+ASSEMBLYAI_API_KEY = "2b791d89824a4d5d8eeb7e310aa6542f"
 
 def transcribe_with_assemblyai(audio_path):
     headers = {'authorization': ASSEMBLYAI_API_KEY}
