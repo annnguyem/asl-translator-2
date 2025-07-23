@@ -96,7 +96,7 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
     import moviepy.editor as mp
     import tempfile
 
-    try:
+  try:
         clips = []
 
         logging.info(f"ℹ️ generate_merged_video called with {len(video_urls)} video URLs and {len(word_timestamps)} word timestamps")
@@ -107,12 +107,13 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
             url = video_urls[i]
             word_info = word_timestamps[i]
 
-            start = word_info.get("start", 0) / 1000.0
+            start = word_info.get("start", 0) / 1000.0  # ms to seconds
             end = word_info.get("end", 0) / 1000.0
-            duration = max(end - start, 0.1)
+            duration = max(end - start, 0.1)  # avoid zero duration
 
             logging.info(f"🔹 Word {i}: start={start:.3f}s, end={end:.3f}s, duration={duration:.3f}s")
 
+            # Download video clip to a temp file
             response = requests.get(url, stream=True)
             if response.status_code != 200:
                 raise Exception(f"Failed to download video from {url}")
@@ -120,15 +121,21 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
             tmp_file.write(response.content)
             tmp_file.close()
 
-            clip = mp.VideoFileClip(tmp_file.name)
-            clip_duration = clip.duration
-            speed_factor = clip_duration / duration if duration > 0 else 1
-
-            logging.info(f"    Original clip duration: {clip_duration:.3f}s, speed_factor: {speed_factor:.3f}")
-
             clip = mp.VideoFileClip(tmp_file.name).without_audio()
-            adjusted_clip = clip.set_duration(duration)
+            clip_duration = clip.duration
+
+            speed_factor = clip_duration / duration
+            logging.info(f"    Original clip duration: {clip_duration:.3f}s, target duration: {duration:.3f}s, speed_factor: {speed_factor:.3f}")
+
+            # Adjust clip speed to match the word duration
+            adjusted_clip = clip.fx(mp.vfx.speedx, speed_factor)
+            # Ensure exact duration (speedx can slightly change duration)
+            adjusted_clip = adjusted_clip.set_duration(duration)
+
             clips.append(adjusted_clip)
+
+            # Clean up the temp file now that it's loaded into moviepy
+            os.unlink(tmp_file.name)
 
         logging.info(f"ℹ️ Concatenating {len(clips)} clips...")
         final_clip = mp.concatenate_videoclips(clips, method="compose")
@@ -136,12 +143,10 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
         logging.info(f"ℹ️ Writing final video to {output_path}...")
         final_clip.write_videofile(output_path, codec="libx264", audio=False, verbose=True)
 
+        # Close clips to free resources
         for clip in clips:
             clip.close()
-            try:
-                os.unlink(clip.filename)
-            except Exception as e:
-                logging.warning(f"⚠️ Could not delete temp clip file {clip.filename}: {e}")
+        final_clip.close()
 
         logging.info(f"✅ Merged video created at {output_path}")
 
