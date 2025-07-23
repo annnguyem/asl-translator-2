@@ -81,6 +81,14 @@ def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign,
 
         output_path = os.path.join(static_dir, f"output_{job_id}.mp4")
         logging.info(f"🎥 Generating merged video at: {output_path}")
+        word_timestamps = []
+        for w in words:
+            word_clean = w.get("text", "").strip().lower()
+            word_timestamps.append({
+                "word": word_clean,
+                "start": w.get("start", 0),
+                "end": w.get("end", 0)
+            })
         generate_merged_video(video_urls, words, output_path)
 
         video_jobs[job_id] = {
