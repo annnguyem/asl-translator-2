@@ -13,15 +13,15 @@ logging.basicConfig(
 ASSEMBLYAI_API_KEY = "2b791d89824a4d5d8eeb7e310aa6542f"
 
 def transcribe_with_assemblyai(audio_path):
-    headers = {"authorization": os.getenv("ASSEMBLYAI_API_KEY"),
-        "transfer-encoding": "chunked"}
+    headers = {    "authorization": ASSEMBLYAI_API_KEY,
+    "transfer-encoding": "chunked"}
 
     logging.info(f"⏳ Uploading audio for transcription: {audio_path}")
     with open(audio_path, 'rb') as f:
         response = requests.post(
             'https://api.assemblyai.com/v2/upload',
             headers=headers,
-            files={'file': f}
+            data=f
         )
     response.raise_for_status()
     upload_url = response.json()['upload_url']
