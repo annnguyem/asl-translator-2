@@ -64,6 +64,12 @@ def transcribe_with_assemblyai(audio_path):
 def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign, generate_merged_video, static_dir):
     try:
         logging.info(f"🎬 [{job_id}] Starting transcription and video generation workflow...")
+        file_size = os.path.getsize(audio_path)
+        logging.info(f"📁 Uploading audio file size: {file_size} bytes")
+        
+        if file_size == 0:
+            raise ValueError("❌ Audio file is empty. Cannot upload to AssemblyAI.")
+
         transcript_data = transcribe_with_assemblyai(audio_path)
 
         transcript = transcript_data.get('text', '')
