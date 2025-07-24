@@ -96,63 +96,41 @@ def generate_merged_video(video_urls, word_timestamps, output_path):
     import moviepy.editor as mp
     import tempfile
 
-    try:
-        clips = []
+    clips = []
 
-        logging.info(f"ℹ️ generate_merged_video called with {len(video_urls)} video URLs and {len(word_timestamps)} word timestamps")
+    for idx, (url, timestamp) in enumerate(zip(video_urls, word_timestamps)):
+        try:
+            # Download video file to temp
+            response = requests.get(url)
+            response.raise_for_status()
 
-        length = min(len(video_urls), len(word_timestamps))
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_vid_file:
+                temp_vid_file.write(response.content)
+                temp_vid_path = temp_vid_file.name
 
-        for i in range(length):
-            url = video_urls[i]
-            word_info = word_timestamps[i]
+            # Load clip
+            clip = VideoFileClip(temp_vid_path)
 
-            start = word_info.get("start", 0) / 1000.0  # ms to seconds
-            end = word_info.get("end", 0) / 1000.0
-            duration = max(end - start, 0.1)  # avoid zero duration
+            # Calculate desired duration in seconds
+            duration_ms = timestamp['end'] - timestamp['start']
+            duration = max(duration_ms / 1000.0, 0.1)  # Avoid 0 duration
 
-            logging.info(f"🔹 Word {i}: start={start:.3f}s, end={end:.3f}s, duration={duration:.3f}s")
+            # Set exact duration (clip is auto-stretched or trimmed)
+            clip = clip.set_duration(duration)
 
-            # Download video clip to a temp file
-            response = requests.get(url, stream=True)
-            if response.status_code != 200:
-                raise Exception(f"Failed to download video from {url}")
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tmp_file.write(response.content)
-            tmp_file.close()
+            clips.append(clip)
 
-            clip = mp.VideoFileClip(tmp_file.name).without_audio()
-            clip_duration = clip.duration
+        except Exception as e:
+            print(f"⚠️ Skipping video {url}: {e}")
+            continue
 
-            speed_factor = clip_duration / duration
-            logging.info(f"    Original clip duration: {clip_duration:.3f}s, target duration: {duration:.3f}s, speed_factor: {speed_factor:.3f}")
-
-            # Adjust clip speed to match the word duration
-            adjusted_clip = clip.fx(mp.vfx.speedx, speed_factor)
-            # Ensure exact duration (speedx can slightly change duration)
-            adjusted_clip = adjusted_clip.set_duration(duration)
-
-            clips.append(adjusted_clip)
-
-            # Clean up the temp file now that it's loaded into moviepy
-            os.unlink(tmp_file.name)
-
-        logging.info(f"ℹ️ Concatenating {len(clips)} clips...")
-        final_clip = mp.concatenate_videoclips(clips, method="compose")
-
-        logging.info(f"ℹ️ Writing final video to {output_path}...")
-        final_clip.write_videofile(output_path, codec="libx264", audio=False, verbose=True)
-
-        # Close clips to free resources
-        for clip in clips:
-            clip.close()
-        final_clip.close()
-
-        logging.info(f"✅ Merged video created at {output_path}")
-
-    except Exception as e:
-        logging.error(f"❌ Failed to merge videos with timing: {e}")
-        raise
+    # Combine all clips
+    if clips:
+        final_video = concatenate_videoclips(clips, method="compose")
+        final_video.write_videofile(output_path, codec="libx264", audio=False, fps=24)
+        print(f"✅ Video created: {output_path}")
+    else:
+        print("❌ No clips to merge.")
 
 # 🎙️ API Models
 class AudioPayload(BaseModel):
