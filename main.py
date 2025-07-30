@@ -146,6 +146,10 @@ async def translate_audio(data: AudioPayload):
     video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
 
     temp_audio_path = f"temp_{data.filename}"
+    if os.path.getsize(temp_audio_path) == 0:
+        logging.error("❌ Uploaded audio file is 0 bytes.")
+        return {"status": "error", "error": "Uploaded audio file is empty"}
+    
     with open(temp_audio_path, "wb") as f:
         f.write(base64.b64decode(data.content_base64))
 
