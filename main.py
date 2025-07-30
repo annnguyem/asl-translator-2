@@ -9,6 +9,7 @@ import subprocess
 import glob
 import multiprocessing
 import logging
+import base64
 
 from fastapi import Query, FastAPI
 from fastapi.responses import JSONResponse
@@ -139,6 +140,13 @@ class AudioPayload(BaseModel):
 
 # 🔊 POST: Upload audio
 @app.post("/translate_audio/")
+# Get just the base64 data after "base64,"
+if content_base64.startswith("data:"):
+    content_base64 = content_base64.split(",")[1]
+
+with open(temp_audio_path, "wb") as f:
+    f.write(base64.b64decode(content_base64))
+    
 async def translate_audio(data: AudioPayload):
     logging.info("🔥 /translate_audio called")
 
