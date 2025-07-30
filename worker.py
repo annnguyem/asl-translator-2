@@ -96,7 +96,7 @@ def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign,
                 "start": w.get("start", 0),
                 "end": w.get("end", 0)
             })
-        generate_merged_video(video_urls, words, output_path)
+        generate_merged_video(video_urls, word_timestamps, output_path)
 
         video_jobs[job_id] = {
             "status": "ready",
