@@ -17,6 +17,12 @@ def transcribe_with_assemblyai(audio_path):
     "transfer-encoding": "chunked"}
 
     logging.info(f"⏳ Uploading audio for transcription: {audio_path}")
+    if not os.path.exists(audio_path):
+        logging.error(f"❌ Audio path does not exist: {audio_path}")
+    elif os.path.getsize(audio_path) < 1000:
+        logging.error(f"❌ Audio file too small ({os.path.getsize(audio_path)} bytes): {audio_path}")
+    else:
+        logging.info(f"✅ Ready to upload {audio_path} ({os.path.getsize(audio_path)} bytes)")
     with open(audio_path, 'rb') as f:
         response = requests.post(
             'https://api.assemblyai.com/v2/upload',
