@@ -156,19 +156,19 @@ async def translate_audio(data: AudioPayload):
         if content_base64.startswith("data:"):
             content_base64 = content_base64.split(",")[1]
 
-# Clean base64 string
-match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
-if match:
-    content_base64 = match.group(1)
-else:
-    content_base64 = data.content_base64.strip()
-
-# Decode base64 safely
-try:
-    audio_bytes = base64.b64decode(content_base64)
-except Exception as e:
-    logging.error(f"❌ Base64 decoding failed: {e}")
-    return {"status": "error", "error": "Invalid base64 audio input"}
+    # Clean base64 string
+    match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
+    if match:
+        content_base64 = match.group(1)
+    else:
+        content_base64 = data.content_base64.strip()
+    
+    # Decode base64 safely
+    try:
+        audio_bytes = base64.b64decode(content_base64)
+    except Exception as e:
+        logging.error(f"❌ Base64 decoding failed: {e}")
+        return {"status": "error", "error": "Invalid base64 audio input"}
 
 # Write to temp file
 try:
