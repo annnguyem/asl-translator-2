@@ -10,6 +10,7 @@ import glob
 import multiprocessing
 import logging
 import base64
+import re
 
 from fastapi import Query, FastAPI
 from fastapi.responses import JSONResponse
@@ -155,12 +156,34 @@ async def translate_audio(data: AudioPayload):
         if content_base64.startswith("data:"):
             content_base64 = content_base64.split(",")[1]
 
-        with open(temp_audio_path, "wb") as f:
-            f.write(base64.b64decode(content_base64))
+# Clean base64 string
+match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
+if match:
+    content_base64 = match.group(1)
+else:
+    content_base64 = data.content_base64.strip()
 
-        if os.path.getsize(temp_audio_path) == 0:
-            logging.error("❌ Uploaded audio file is 0 bytes.")
-            return {"status": "error", "error": "Uploaded audio file is empty"}
+# Decode base64 safely
+try:
+    audio_bytes = base64.b64decode(content_base64)
+except Exception as e:
+    logging.error(f"❌ Base64 decoding failed: {e}")
+    return {"status": "error", "error": "Invalid base64 audio input"}
+
+# Write to temp file
+try:
+    with open(temp_audio_path, "wb") as f:
+        f.write(audio_bytes)
+
+    file_size = os.path.getsize(temp_audio_path)
+    logging.info(f"📦 Saved audio file size: {file_size} bytes")
+
+    if file_size == 0:
+        logging.error("❌ Uploaded audio file is 0 bytes.")
+        return {"status": "error", "error": "Uploaded audio file is empty"}
+except Exception as e:
+    logging.error(f"❌ Failed to write audio file: {e}")
+    return {"status": "error", "error": "Failed to save audio file"}
 
         import threading
         threading.Thread(
