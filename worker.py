@@ -29,6 +29,12 @@ def transcribe_with_assemblyai(audio_path):
             headers=headers,
             data=f
         )
+    if response.status_code != 200:
+        logging.error(f"❌ Upload failed with status {response.status_code}: {response.text}")
+        response.raise_for_status()
+
+    upload_url = response.json()["upload_url"]
+    logging.info(f"✅ Uploaded successfully. URL: {upload_url}")
     response.raise_for_status()
     upload_url = response.json()['upload_url']
     logging.info(f"✅ Uploaded audio. Upload URL: {upload_url}")
