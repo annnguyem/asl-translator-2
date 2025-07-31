@@ -29,7 +29,7 @@ logging.basicConfig(
 multiprocessing.set_start_method("spawn", force=True)
 
 # 🔁 Setup
-STATIC_DIR = "static_output"
+STATIC_DIR = os.path.join(os.getcwd(), "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
 
 # 🚀 FastAPI app
@@ -140,42 +140,47 @@ class AudioPayload(BaseModel):
 
 # 🔊 POST: Upload audio
 @app.post("/translate_audio/")
-# Get just the base64 data after "base64,"
-if content_base64.startswith("data:"):
-    content_base64 = content_base64.split(",")[1]
-
-with open(temp_audio_path, "wb") as f:
-    f.write(base64.b64decode(content_base64))
-    
+# Get just the base64 data after "base64,"  
+@app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
     logging.info("🔥 /translate_audio called")
 
-    job_id = str(uuid.uuid4())
-    video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
+    try:
+        job_id = str(uuid.uuid4())
+        video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
 
-    temp_audio_path = f"temp_{data.filename}"
-    if os.path.getsize(temp_audio_path) == 0:
-        logging.error("❌ Uploaded audio file is 0 bytes.")
-        return {"status": "error", "error": "Uploaded audio file is empty"}
-    
-    with open(temp_audio_path, "wb") as f:
-        f.write(base64.b64decode(data.content_base64))
+        temp_audio_path = f"temp_{data.filename}"
 
-    import threading
-    threading.Thread(
-        target=process_audio_worker,
-        args=(
-            job_id,
-            temp_audio_path,
-            video_jobs,
-            translate_text_to_sign,
-            generate_merged_video,
-            STATIC_DIR
-        ),
-        daemon=True
-    ).start()
+        content_base64 = data.content_base64
+        if content_base64.startswith("data:"):
+            content_base64 = content_base64.split(",")[1]
 
-    return {"job_id": job_id}
+        with open(temp_audio_path, "wb") as f:
+            f.write(base64.b64decode(content_base64))
+
+        if os.path.getsize(temp_audio_path) == 0:
+            logging.error("❌ Uploaded audio file is 0 bytes.")
+            return {"status": "error", "error": "Uploaded audio file is empty"}
+
+        import threading
+        threading.Thread(
+            target=process_audio_worker,
+            args=(
+                job_id,
+                temp_audio_path,
+                video_jobs,
+                translate_text_to_sign,
+                generate_merged_video,
+                STATIC_DIR
+            ),
+            daemon=True
+        ).start()
+
+        return {"job_id": job_id}
+
+    except Exception as e:
+        logging.error(f"❌ Error in /translate_audio/: {e}")
+        return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
 # 🎞️ GET: Poll job status
 @app.get("/video_status/{job_id}")
