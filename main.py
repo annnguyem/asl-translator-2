@@ -156,19 +156,19 @@ async def translate_audio(data: AudioPayload):
         if content_base64.startswith("data:"):
             content_base64 = content_base64.split(",")[1]
 
-    # Clean base64 string
-    match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
-    if match:
-        content_base64 = match.group(1)
-    else:
-        content_base64 = data.content_base64.strip()
-    
-    # Decode base64 safely
-    try:
-        audio_bytes = base64.b64decode(content_base64)
-    except Exception as e:
-        logging.error(f"❌ Base64 decoding failed: {e}")
-        return {"status": "error", "error": "Invalid base64 audio input"}
+# Clean base64 string
+match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
+if match:
+    content_base64 = match.group(1)
+else:
+    content_base64 = data.content_base64.strip()
+
+# Decode base64 safely
+try:
+    audio_bytes = base64.b64decode(content_base64)
+except Exception as e:
+    logging.error(f"❌ Base64 decoding failed: {e}")
+    return {"status": "error", "error": "Invalid base64 audio input"}
 
 # Write to temp file
 try:
@@ -181,29 +181,10 @@ try:
     if file_size == 0:
         logging.error("❌ Uploaded audio file is 0 bytes.")
         return {"status": "error", "error": "Uploaded audio file is empty"}
+
 except Exception as e:
     logging.error(f"❌ Failed to write audio file: {e}")
     return {"status": "error", "error": "Failed to save audio file"}
-
-        import threading
-        threading.Thread(
-            target=process_audio_worker,
-            args=(
-                job_id,
-                temp_audio_path,
-                video_jobs,
-                translate_text_to_sign,
-                generate_merged_video,
-                STATIC_DIR
-            ),
-            daemon=True
-        ).start()
-
-        return {"job_id": job_id}
-
-    except Exception as e:
-        logging.error(f"❌ Error in /translate_audio/: {e}")
-        return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
 # 🎞️ GET: Poll job status
 @app.get("/video_status/{job_id}")
