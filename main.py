@@ -156,52 +156,52 @@ async def translate_audio(data: AudioPayload):
         if content_base64.startswith("data:"):
             content_base64 = content_base64.split(",")[1]
 
-# Clean base64 string
-match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
-if match:
-    content_base64 = match.group(1)
-else:
-    content_base64 = data.content_base64.strip()
-
-# Decode base64 safely
-try:
-    audio_bytes = base64.b64decode(content_base64)
-except Exception as e:
-    logging.error(f"❌ Base64 decoding failed: {e}")
-    return {"status": "error", "error": "Invalid base64 audio input"}
-
-# Write to temp file
-try:
-    with open(temp_audio_path, "wb") as f:
-        f.write(audio_bytes)
-
-    file_size = os.path.getsize(temp_audio_path)
-    logging.info(f"📦 Saved audio file size: {file_size} bytes")
-
-    if file_size == 0:
-        logging.error("❌ Uploaded audio file is 0 bytes.")
-        return {"status": "error", "error": "Uploaded audio file is empty"}
-
-except Exception as e:
-    logging.error(f"❌ Failed to write audio file: {e}")
-    return {"status": "error", "error": "Failed to save audio file"}
-
-# 🎞️ GET: Poll job status
-@app.get("/video_status/{job_id}")
-def video_status(job_id: str):
-    if job_id not in video_jobs:
-        return {"status": "not_found"}
-
-    job = video_jobs[job_id]
-    if job["status"] == "ready":
-        return {
-            "status": "ready",
-            "video_url": f"/static/output_{job_id}.mp4",
-            "transcript": job.get("transcript", "")
-        }
-    elif job["status"] == "error":
-        return {"status": "error"}
-    return {"status": "processing"}
+    # Clean base64 string
+    match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
+    if match:
+        content_base64 = match.group(1)
+    else:
+        content_base64 = data.content_base64.strip()
+    
+    # Decode base64 safely
+    try:
+        audio_bytes = base64.b64decode(content_base64)
+    except Exception as e:
+        logging.error(f"❌ Base64 decoding failed: {e}")
+        return {"status": "error", "error": "Invalid base64 audio input"}
+    
+    # Write to temp file
+    try:
+        with open(temp_audio_path, "wb") as f:
+            f.write(audio_bytes)
+    
+        file_size = os.path.getsize(temp_audio_path)
+        logging.info(f"📦 Saved audio file size: {file_size} bytes")
+    
+        if file_size == 0:
+            logging.error("❌ Uploaded audio file is 0 bytes.")
+            return {"status": "error", "error": "Uploaded audio file is empty"}
+    
+    except Exception as e:
+        logging.error(f"❌ Failed to write audio file: {e}")
+        return {"status": "error", "error": "Failed to save audio file"}
+    
+    # 🎞️ GET: Poll job status
+    @app.get("/video_status/{job_id}")
+    def video_status(job_id: str):
+        if job_id not in video_jobs:
+            return {"status": "not_found"}
+    
+        job = video_jobs[job_id]
+        if job["status"] == "ready":
+            return {
+                "status": "ready",
+                "video_url": f"/static/output_{job_id}.mp4",
+                "transcript": job.get("transcript", "")
+            }
+        elif job["status"] == "error":
+            return {"status": "error"}
+        return {"status": "processing"}
 
 # ✅ GET: Health check
 @app.get("/")
