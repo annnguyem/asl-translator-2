@@ -140,8 +140,6 @@ class AudioPayload(BaseModel):
 
 # 🔊 POST: Upload audio
 @app.post("/translate_audio/")
-# Get just the base64 data after "base64,"  
-@app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
     logging.info("🔥 /translate_audio called")
     try:
@@ -202,6 +200,17 @@ async def translate_audio(data: AudioPayload):
         logging.error(f"❌ Error in /translate_audio: {e}")
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+@app.post("/debug_audio/")
+async def debug_audio(data: AudioPayload):
+    try:
+        decoded = base64.b64decode(data.content_base64 or "")
+        return {
+            "filename": data.filename,
+            "base64_length": len(data.content_base64 or ""),
+            "decoded_length": len(decoded)
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
