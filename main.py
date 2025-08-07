@@ -11,7 +11,6 @@ import multiprocessing
 import logging
 import base64
 import re
-
 from fastapi import Query, FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -145,65 +144,80 @@ class AudioPayload(BaseModel):
 @app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
     logging.info("🔥 /translate_audio called")
-
     try:
         job_id = str(uuid.uuid4())
         video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
 
         temp_audio_path = f"temp_{data.filename}"
 
-        content_base64 = data.content_base64
+        # Normalize / strip data URI if present
+        content_base64 = data.content_base64 or ""
         if content_base64.startswith("data:"):
-            content_base64 = content_base64.split(",")[1]
+            match = re.match(r"^data:audio/\w+;base64,(.*)$", content_base64)
+            if match:
+                content_base64 = match.group(1)
+            else:
+                # fallback: split after comma
+                parts = content_base64.split(",", 1)
+                if len(parts) == 2:
+                    content_base64 = parts[1]
 
-    # Clean base64 string
-    match = re.match(r"^data:audio/\w+;base64,(.*)$", data.content_base64)
-    if match:
-        content_base64 = match.group(1)
-    else:
-        content_base64 = data.content_base64.strip()
-    
-    # Decode base64 safely
-    try:
-        audio_bytes = base64.b64decode(content_base64)
-    except Exception as e:
-        logging.error(f"❌ Base64 decoding failed: {e}")
-        return {"status": "error", "error": "Invalid base64 audio input"}
-    
-    # Write to temp file
-    try:
-        with open(temp_audio_path, "wb") as f:
-            f.write(audio_bytes)
-    
-        file_size = os.path.getsize(temp_audio_path)
-        logging.info(f"📦 Saved audio file size: {file_size} bytes")
-    
-        if file_size == 0:
-            logging.error("❌ Uploaded audio file is 0 bytes.")
-            return {"status": "error", "error": "Uploaded audio file is empty"}
-    
-    except Exception as e:
-        logging.error(f"❌ Failed to write audio file: {e}")
-        return {"status": "error", "error": "Failed to save audio file"}
-    
-    # 🎞️ GET: Poll job status
-    @app.get("/video_status/{job_id}")
-    def video_status(job_id: str):
-        if job_id not in video_jobs:
-            return {"status": "not_found"}
-    
-        job = video_jobs[job_id]
-        if job["status"] == "ready":
-            return {
-                "status": "ready",
-                "video_url": f"/static/output_{job_id}.mp4",
-                "transcript": job.get("transcript", "")
-            }
-        elif job["status"] == "error":
-            return {"status": "error"}
-        return {"status": "processing"}
+        # Decode base64 safely
+        try:
+            audio_bytes = base64.b64decode(content_base64)
+        except Exception as e:
+            logging.error(f"❌ Base64 decoding failed: {e}")
+            return JSONResponse(status_code=400, content={"status": "error", "error": "Invalid base64 audio input"})
 
-# ✅ GET: Health check
+        # Write file
+        try:
+            with open(temp_audio_path, "wb") as f:
+                f.write(audio_bytes)
+            file_size = os.path.getsize(temp_audio_path)
+            logging.info(f"📦 Saved audio file size: {file_size} bytes")
+            if file_size == 0:
+                logging.error("❌ Uploaded audio file is 0 bytes.")
+                return JSONResponse(status_code=400, content={"status": "error", "error": "Uploaded audio file is empty"})
+        except Exception as e:
+            logging.error(f"❌ Failed to write audio file: {e}")
+            return JSONResponse(status_code=500, content={"status": "error", "error": "Failed to save audio file"})
+
+        # Spawn processing (thread or process)
+        threading = __import__("threading")
+        threading.Thread(
+            target=process_audio_worker,
+            args=(
+                job_id,
+                temp_audio_path,
+                video_jobs,
+                translate_text_to_sign,
+                generate_merged_video,
+                STATIC_DIR,
+            ),
+            daemon=True,
+        ).start()
+
+        return {"job_id": job_id}
+    except Exception as e:
+        logging.error(f"❌ Error in /translate_audio: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+@app.get("/video_status/{job_id}")
+def video_status(job_id: str):
+    if job_id not in video_jobs:
+        return {"status": "not_found"}
+    job = video_jobs[job_id]
+    if job.get("status") == "ready":
+        return {
+            "status": "ready",
+            "video_url": f"/static/output_{job_id}.mp4",
+            "transcript": job.get("transcript", ""),
+        }
+    elif job.get("status") == "error":
+        return {"status": "error"}
+    return {"status": "processing"}
+
 @app.get("/")
 def health_check():
     return {"status": "ok"}
