@@ -230,3 +230,15 @@ def video_status(job_id: str):
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+
+@app.post("/debug_audio/")
+async def debug_audio(data: AudioPayload):
+    try:
+        decoded = base64.b64decode(data.content_base64 or "")
+        return {
+            "filename": data.filename,
+            "base64_length": len(data.content_base64 or ""),
+            "decoded_length": len(decoded)
+        }
+    except Exception as e:
+        return {"error": str(e)}
