@@ -142,6 +142,8 @@ class AudioPayload(BaseModel):
 @app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
     logging.info("🔥 /translate_audio called")
+    logging.info(f"Base64 content length: {len(data.content_base64 or '')}")
+    
     try:
         job_id = str(uuid.uuid4())
         video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
