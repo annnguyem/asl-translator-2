@@ -1,0 +1,30 @@
+name: Build and Test
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Create .env file
+        run: |
+          echo "ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY}" > .env
+
+      - name: Verify env is working
+        run: |
+          python -c "import os; print('Key present?', bool(os.getenv('ASSEMBLYAI_API_KEY')))"
