@@ -3,7 +3,7 @@ import os, time, logging, requests, traceback
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def _get_api_key() -> str:
-    key = os.getenv("dbb3ea03ff1a43468beef535573eb703", "").strip()
+    key = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
     if not key:
         raise RuntimeError("ASSEMBLYAI_API_KEY not set")
     return key
