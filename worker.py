@@ -1,12 +1,13 @@
 import os, time, logging, requests, traceback
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+load_dotenv()  # loads .env if present (e.g., created by Actions or on your server)
 
 def _get_api_key() -> str:
-    key = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("ASSEMBLYAI_API_KEY not set")
-    return key
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")  # do NOT hardcode
+if not ASSEMBLYAI_API_KEY:
+    raise RuntimeError("ASSEMBLYAI_API_KEY not set")
 
 def transcribe_with_assemblyai(audio_path: str) -> dict:
     api_key = _get_api_key()
