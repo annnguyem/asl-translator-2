@@ -1,122 +1,86 @@
-import os
-import time
-import logging
-import traceback
-import requests
+import os, time, logging, requests, traceback
 
-# 🔧 Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-ASSEMBLYAI_API_KEY = "2b791d89824a4d5d8eeb7e310aa6542f"
+def _get_api_key() -> str:
+    key = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("ASSEMBLYAI_API_KEY not set")
+    return key
 
-def transcribe_with_assemblyai(audio_path):
-    headers = {    "authorization": ASSEMBLYAI_API_KEY,
-    "transfer-encoding": "chunked"}
+def transcribe_with_assemblyai(audio_path: str) -> dict:
+    api_key = _get_api_key()
 
-    logging.info(f"⏳ Uploading audio for transcription: {audio_path}")
-    if not os.path.exists(audio_path):
-        logging.error(f"❌ Audio path does not exist: {audio_path}")
-    elif os.path.getsize(audio_path) < 1000:
-        logging.error(f"❌ Audio file too small ({os.path.getsize(audio_path)} bytes): {audio_path}")
-    else:
-        logging.info(f"✅ Ready to upload {audio_path} ({os.path.getsize(audio_path)} bytes)")
-    with open(audio_path, 'rb') as f:
-        response = requests.post(
-            'https://api.assemblyai.com/v2/upload',
-            headers=headers,
-            data=f
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
+        raise ValueError(f"Audio file missing or too small: {audio_path}")
+
+    # 1) Upload
+    logging.info(f"⏳ Uploading {audio_path} ({os.path.getsize(audio_path)} bytes)")
+    with open(audio_path, "rb") as f:
+        up = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers={"authorization": api_key, "content-type": "application/octet-stream"},
+            data=f,
+            timeout=60,
         )
-    if response.status_code != 200:
-        logging.error(f"❌ Upload failed with status {response.status_code}: {response.text}")
-        response.raise_for_status()
+    up.raise_for_status()
+    upload_url = up.json()["upload_url"]
+    logging.info(f"✅ Uploaded. URL: {upload_url}")
 
-    upload_url = response.json()["upload_url"]
-    logging.info(f"✅ Uploaded successfully. URL: {upload_url}")
-    response.raise_for_status()
-    upload_url = response.json()['upload_url']
-    logging.info(f"✅ Uploaded audio. Upload URL: {upload_url}")
-
-    # Request transcript with word-level timestamps
-    transcript_request = {
-        'audio_url': upload_url,
-        'punctuate': True,
-        'format_text': True,
-        'word_boost': [],
-        'word_timestamps': True
+    # 2) Submit transcript
+    dual_channel = os.getenv("AAI_DUAL_CHANNEL", "false").lower() == "true"  # set true for stereo call audio
+    body = {
+        "audio_url": upload_url,
+        "punctuate": True,
+        "format_text": True,
+        "speaker_labels": False,
+        "dual_channel": dual_channel,
     }
-
-    logging.info("⏳ Requesting transcript with word timestamps...")
-    transcript_response = requests.post(
-        'https://api.assemblyai.com/v2/transcript',
-        json=transcript_request,
-        headers=headers
+    tr = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers={"authorization": api_key, "content-type": "application/json"},
+        json=body,
+        timeout=30,
     )
-    transcript_response.raise_for_status()
-    transcript_id = transcript_response.json()['id']
-    logging.info(f"✅ Transcript requested. Transcript ID: {transcript_id}")
+    tr.raise_for_status()
+    tid = tr.json()["id"]
+    logging.info(f"📝 Transcript ID: {tid}")
 
-    # Poll for completion
+    # 3) Poll
     while True:
-        polling = requests.get(f'https://api.assemblyai.com/v2/transcript/{transcript_id}', headers=headers)
-        polling.raise_for_status()
-        data = polling.json()
-        status = data['status']
-        logging.info(f"🔄 Polling transcription status: {status}")
-        if status == 'completed':
-            logging.info("✅ Transcription completed.")
+        r = requests.get(f"https://api.assemblyai.com/v2/transcript/{tid}", headers={"authorization": api_key}, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        status = data.get("status")
+        logging.info(f"🔄 Transcription status: {status}")
+        if status == "completed":
             return data
-        elif status == 'error':
-            raise Exception(f"AssemblyAI error: {data['error']}")
-        time.sleep(3)
+        if status == "error":
+            raise RuntimeError(f"AssemblyAI error: {data.get('error')}")
+        time.sleep(2)
 
-
-def process_audio_worker(job_id, audio_path, video_jobs, translate_text_to_sign, generate_merged_video, static_dir):
+def process_audio_worker(job_id: str, audio_path: str, video_jobs: dict,
+                         lookup_sign_urls_for_word, build_video_plan, generate_merged_video, static_dir: str):
     try:
-        logging.info(f"🎬 [{job_id}] Starting transcription and video generation workflow...")
-        file_size = os.path.getsize(audio_path)
-        logging.info(f"📁 Uploading audio file size: {file_size} bytes")
-        
-        if file_size == 0:
-            raise ValueError("❌ Audio file is empty. Cannot upload to AssemblyAI.")
+        logging.info(f"🎬 [{job_id}] Start")
+        data = transcribe_with_assemblyai(audio_path)
+        transcript = data.get("text", "") or ""
+        words = data.get("words", []) or []
 
-        transcript_data = transcribe_with_assemblyai(audio_path)
+        # plan & render
+        plan = build_video_plan(words)
+        out_path = os.path.join(static_dir, f"output_{job_id}.mp4")
+        generate_merged_video(plan, out_path)
 
-        transcript = transcript_data.get('text', '')
-        words = transcript_data.get('words', [])
-        logging.info(f"🗣️ Transcript text: {transcript}")
-        logging.info(f"🕒 Word timestamps received: {len(words)} words")
-
-        for w in words[:5]:
-            start_ms = w.get('start', 'N/A')
-            end_ms = w.get('end', 'N/A')
-            word_text = w.get('text', '')
-            logging.info(f"   Word: '{word_text}' start: {start_ms}ms end: {end_ms}ms")
-
-        video_urls = translate_text_to_sign(transcript)
-        logging.info(f"🔗 Retrieved {len(video_urls)} ASL video URLs for translation.")
-
-        output_path = os.path.join(static_dir, f"output_{job_id}.mp4")
-        logging.info(f"🎥 Generating merged video at: {output_path}")
-        word_timestamps = []
-        for w in words:
-            word_clean = w.get("text", "").strip().lower()
-            word_timestamps.append({
-                "word": word_clean,
-                "start": w.get("start", 0),
-                "end": w.get("end", 0)
-            })
-        generate_merged_video([v["url"] for v in video_url_map], word_timestamps, output_path)
-
-        video_jobs[job_id] = {
-            "status": "ready",
-            "video_urls": video_urls,
-            "transcript": transcript
-        }
-        logging.info(f"✅ Job [{job_id}] completed successfully.")
-
-    except Exception:
-        logging.error(f"❌ Error occurred during processing job [{job_id}]:")
-        logging.exception("Exception traceback:")
+        video_jobs[job_id] = {"status": "ready", "transcript": transcript}
+        logging.info(f"✅ [{job_id}] Done, video at {out_path}")
+    except Exception as e:
+        logging.error(f"❌ [{job_id}] Failed: {e}")
+        logging.debug("Traceback:\n" + traceback.format_exc())
+        video_jobs[job_id] = {"status": "error", "error": str(e)}
+    finally:
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+        except Exception:
+            pass
