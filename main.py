@@ -1,4 +1,4 @@
-import os, sys, string, base64, traceback, requests, uuid, glob, logging, re, tempfile, threading
+import os, sys, string, base64, traceback, requests, uuid, glob, logging, re, tempfile, threading, logging
 from functools import lru_cache
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -9,6 +9,13 @@ from worker import process_audio_worker
 import re
 from urllib.parse import unquote
 
+try:
+    from moviepy.config import change_settings
+    import imageio_ffmpeg
+    change_settings({"FFMPEG_BINARY": imageio_ffmpeg.get_ffmpeg_exe()})
+except Exception as e:
+    logging.warning(f"FFmpeg setup warning: {e}")
+    
 def decode_base64_field(field: str) -> bytes:
     """
     Accepts data URLs or raw base64. Handles URL-safe base64 (-,_), whitespace,
