@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from worker import process_audio_worker
 import re
 from urllib.parse import unquote
+from fastapi.responses import JSONResponse
 
 try:
     from moviepy.config import change_settings
@@ -144,28 +145,35 @@ def build_video_plan(assemblyai_words: list[dict]) -> list[tuple[str, float]]:
 
 def generate_merged_video(video_plan: list[tuple[str, float]], output_path: str) -> None:
     from moviepy.editor import VideoFileClip, concatenate_videoclips
-    tmp_files: list[str] = []
-    clips = []
+    import tempfile
+
+    tmp_files, clips = [], []
     try:
         for url, dur in video_plan:
             try:
-                r = requests.get(url, timeout=10)
+                r = requests.get(url, timeout=12)
                 r.raise_for_status()
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
                     tf.write(r.content)
                     tmp_files.append(tf.name)
-                clip = VideoFileClip(tf.name).set_duration(dur)
+                clip = VideoFileClip(tf.name).set_duration(max(float(dur), 0.08))
                 clips.append(clip)
             except Exception as e:
-                logging.warning(f"⚠️ Skipping clip {url}: {e}")
+                logging.warning(f"ASL clip skipped ({url}): {e}")
+
         if not clips:
             raise RuntimeError("No ASL clips available to merge.")
+
         final = concatenate_videoclips(clips, method="compose")
-        final.write_videofile(output_path, codec="libx264", audio=False, fps=24)
-    finally:
+        final.write_videofile(output_path, codec="libx264", audio=False, fps=24, verbose=False, logger=None)
         for c in clips:
             try: c.close()
             except: pass
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError("Video file not written or empty.")
+        logging.info(f"✅ Wrote video {output_path} ({os.path.getsize(output_path)} bytes)")
+    finally:
         for p in tmp_files:
             try: os.remove(p)
             except: pass
@@ -224,6 +232,19 @@ def video_status(job_id: str):
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/debug_ffmpeg")
+def debug_ffmpeg():
+    try:
+        from moviepy.editor import ColorClip
+        out = os.path.join(STATIC_DIR, "ffmpeg_test.mp4")
+        clip = ColorClip(size=(320, 240), color=(0, 0, 0), duration=1)
+        clip.write_videofile(out, codec="libx264", fps=24, audio=False, verbose=False, logger=None)
+        clip.close()
+        return {"ok": True, "url": "/static/ffmpeg_test.mp4", "size": os.path.getsize(out)}
+    except Exception as e:
+        logging.exception("ffmpeg test failed")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 @app.post("/debug_audio/")
 async def debug_audio(data: AudioPayload):
