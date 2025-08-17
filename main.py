@@ -129,35 +129,35 @@ class AudioPayload(BaseModel):
 
 @app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
-# ---- Normalize & decode base64 (robust) ----
-content_base64 = (data.content_base64 or "").strip()
-
-# Log a short prefix so you can confirm what's arriving in Render logs
-logging.info(f"[upload] content_base64 prefix: {content_base64[:40]!r}")
-
-# If a data URL is provided, split once after the comma
-if content_base64.startswith("data:"):
-    parts = content_base64.split(",", 1)
-    content_base64 = parts[1] if len(parts) == 2 else ""
-
-# Remove any whitespace/newlines that can sneak in
-content_base64 = content_base64.replace("\n", "").replace("\r", "").replace(" ", "")
-
-# Pad to a multiple of 4 (= required by base64)
-missing = (-len(content_base64)) % 4
-if missing:
-    content_base64 += "=" * missing
-
-# Strict decode so truly bad input is caught cleanly
-try:
-    audio_bytes = base64.b64decode(content_base64, validate=True)
-except Exception as e:
-    logging.error(f"❌ Base64 decoding failed: {e}")
-    return JSONResponse(
-        status_code=400,
-        content={"status": "error", "error": f"Invalid base64 audio: {e}"}
-    )
-# --------------------------------------------
+    # ---- Normalize & decode base64 (robust) ----
+    content_base64 = (data.content_base64 or "").strip()
+    
+    # Log a short prefix so you can confirm what's arriving in Render logs
+    logging.info(f"[upload] content_base64 prefix: {content_base64[:40]!r}")
+    
+    # If a data URL is provided, split once after the comma
+    if content_base64.startswith("data:"):
+        parts = content_base64.split(",", 1)
+        content_base64 = parts[1] if len(parts) == 2 else ""
+    
+    # Remove any whitespace/newlines that can sneak in
+    content_base64 = content_base64.replace("\n", "").replace("\r", "").replace(" ", "")
+    
+    # Pad to a multiple of 4 (= required by base64)
+    missing = (-len(content_base64)) % 4
+    if missing:
+        content_base64 += "=" * missing
+    
+    # Strict decode so truly bad input is caught cleanly
+    try:
+        audio_bytes = base64.b64decode(content_base64, validate=True)
+    except Exception as e:
+        logging.error(f"❌ Base64 decoding failed: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "error": f"Invalid base64 audio: {e}"}
+        )
+    # --------------------------------------------
 
 
 @app.get("/video_status/{job_id}")
