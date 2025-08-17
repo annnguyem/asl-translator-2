@@ -6,6 +6,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from worker import process_audio_worker
+import re
+from urllib.parse import unquote
+
+def decode_base64_field(field: str) -> bytes:
+    """
+    Accepts data URLs or raw base64. Handles URL-safe base64 (-,_), whitespace,
+    URL-encoding, and padding. Raises ValueError on failure.
+    """
+    s = (field or "").strip()
+    # Log a short prefix for debugging
+    logging.info(f"[upload] prefix: {s[:40]!r}")
+
+    # If it's a data URL like data:audio/...;base64,XXXX split off the header
+    if s.startswith("data:"):
+        parts = s.split(",", 1)
+        s = parts[1] if len(parts) == 2 else ""
+
+    # Undo URL-encoding just in case (e.g., %2B instead of +)
+    s = unquote(s)
+
+    # Remove whitespace
+    s = s.replace("\n", "").replace("\r", "").replace(" ", "")
+
+    # Convert URL-safe base64 to standard
+    s = s.replace("-", "+").replace("_", "/")
+
+    # Strip any characters that are not in the base64 alphabet
+    s = re.sub(r"[^A-Za-z0-9+/=]", "", s)
+
+    # Pad to a multiple of 4
+    missing = (-len(s)) % 4
+    if missing:
+        s += "=" * missing
+
+    # Try strict decode first; fall back to non-strict
+    try:
+        return base64.b64decode(s, validate=True)
+    except Exception:
+        try:
+            return base64.b64decode(s)
+        except Exception as e:
+            raise ValueError(f"Base64 decode failed: {e}")
 
 # 🔧 Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stdout)
@@ -148,9 +190,9 @@ async def translate_audio(data: AudioPayload):
     if missing:
         content_base64 += "=" * missing
     
-    # Strict decode so truly bad input is caught cleanly
+    # ---- Normalize & decode base64 (robust) ----
     try:
-        audio_bytes = base64.b64decode(content_base64, validate=True)
+        audio_bytes = decode_base64_field(data.content_base64)
     except Exception as e:
         logging.error(f"❌ Base64 decoding failed: {e}")
         return JSONResponse(
@@ -158,6 +200,7 @@ async def translate_audio(data: AudioPayload):
             content={"status": "error", "error": f"Invalid base64 audio: {e}"}
         )
     # --------------------------------------------
+
 
 
 @app.get("/video_status/{job_id}")
