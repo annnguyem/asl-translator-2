@@ -129,49 +129,36 @@ class AudioPayload(BaseModel):
 
 @app.post("/translate_audio/")
 async def translate_audio(data: AudioPayload):
-    logging.info("🔥 /translate_audio called")
-    try:
-        job_id = str(uuid.uuid4())
-        video_jobs[job_id] = {"status": "processing", "transcript": ""}
+# ---- Normalize & decode base64 (robust) ----
+content_base64 = (data.content_base64 or "").strip()
 
-        # sanitize extension and write to a job-scoped temp file
-        ext = os.path.splitext(data.filename)[1].lower()
-        if ext not in {".mp3", ".wav", ".m4a", ".aac", ".mp4"}:
-            ext = ".mp3"
-        temp_audio_path = f"temp_{job_id}{ext}"
+# Log a short prefix so you can confirm what's arriving in Render logs
+logging.info(f"[upload] content_base64 prefix: {content_base64[:40]!r}")
 
-        # strip data URI prefix if present
-        b64 = data.content_base64 or ""
-        if b64.startswith("data:"):
-            parts = b64.split(",", 1)
-            b64 = parts[1] if len(parts) == 2 else ""
+# If a data URL is provided, split once after the comma
+if content_base64.startswith("data:"):
+    parts = content_base64.split(",", 1)
+    content_base64 = parts[1] if len(parts) == 2 else ""
 
-        try:
-            audio_bytes = base64.b64decode(b64)
-        except Exception as e:
-            return JSONResponse(status_code=400, content={"status": "error", "error": f"Invalid base64 audio: {e}"})
-        with open(temp_audio_path, "wb") as f:
-            f.write(audio_bytes)
-        if os.path.getsize(temp_audio_path) == 0:
-            return JSONResponse(status_code=400, content={"status": "error", "error": "Uploaded audio is empty"})
+# Remove any whitespace/newlines that can sneak in
+content_base64 = content_base64.replace("\n", "").replace("\r", "").replace(" ", "")
 
-        threading.Thread(
-            target=process_audio_worker,
-            args=(
-                job_id,
-                temp_audio_path,
-                video_jobs,
-                lookup_sign_urls_for_word,  # per-word lookup
-                build_video_plan,           # assemble (url, duration) plan
-                generate_merged_video,
-                STATIC_DIR,
-            ),
-            daemon=True,
-        ).start()
-        return {"job_id": job_id}
-    except Exception as e:
-        logging.exception("❌ Error in /translate_audio")
-        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+# Pad to a multiple of 4 (= required by base64)
+missing = (-len(content_base64)) % 4
+if missing:
+    content_base64 += "=" * missing
+
+# Strict decode so truly bad input is caught cleanly
+try:
+    audio_bytes = base64.b64decode(content_base64, validate=True)
+except Exception as e:
+    logging.error(f"❌ Base64 decoding failed: {e}")
+    return JSONResponse(
+        status_code=400,
+        content={"status": "error", "error": f"Invalid base64 audio: {e}"}
+    )
+# --------------------------------------------
+
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
