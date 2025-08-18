@@ -1,25 +1,3 @@
-# main.py
-# FastAPI backend for ASL video generation
-#
-# Endpoints:
-#   POST /translate_audio_form/   -> multipart form:
-#        - EITHER: file=<binary file>
-#        - OR:     file_b64=<data:...;base64,...>  (plus optional filename, mime)
-#   POST /translate_audio/        -> JSON body { filename, content_base64 }
-#   GET  /video_status/{job_id}   -> poll job status
-#   GET  /                        -> health
-#
-# requirements.txt (minimum):
-# fastapi
-# uvicorn
-# requests
-# moviepy
-# imageio-ffmpeg
-# python-multipart
-#
-# start command on Render:
-# uvicorn main:app --host 0.0.0.0 --port $PORT
-
 import os
 import sys
 import glob
@@ -66,7 +44,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/videos", StaticFiles(directory=STATIC_DIR, html=False), name="videos")
 
 # In-memory job store
 video_jobs: dict = {}
