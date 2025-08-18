@@ -1,5 +1,13 @@
 import os, time, logging, requests, traceback
 from dotenv import load_dotenv
+import urllib.parse
+
+_orig_send = requests.Session.send
+def _logged_send(self, request, **kwargs):
+    host = urllib.parse.urlparse(request.url).netloc
+    logging.info("[egress] %s %s", request.method, request.url)
+    return _orig_send(self, request, **kwargs)
+requests.Session.send = _logged_send
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 load_dotenv()  # loads .env if present (e.g., created by Actions or on your server)
