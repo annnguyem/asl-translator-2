@@ -287,10 +287,10 @@ def video_status(job_id: str):
     if not job:
         return {"status": "not_found"}
     if job.get("status") == "ready":
-        url = job.get("video_url") or f"/videos/output_{job_id}.mp4"   # ✅ use /videos
+        url = job.get("video_url") or f"/videos/output_{job_id}.mp4"  # <-- use /videos
         return {
             "status": "ready",
-            "video_url": url,                                          # ✅ was /static/...
+            "video_url": url,   # <-- RETURN url here
             "transcript": job.get("transcript", ""),
         }
     if job.get("status") == "error":
@@ -322,7 +322,7 @@ def debug_ffmpeg():
         clip = ColorClip((320, 240), color=(0, 0, 0), duration=1)
         clip.write_videofile(out, codec="libx264", fps=24, audio=False, verbose=False, logger=None)
         clip.close()
-        return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}  # ✅
+         return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
     except Exception as e:
         logging.exception("ffmpeg test failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
