@@ -70,13 +70,18 @@ def process_audio_worker(job_id: str, audio_path: str, video_jobs: dict,
         transcript = data.get("text", "") or ""
         words = data.get("words", []) or []
 
-        # plan & render
-        plan = build_video_plan(words)
+        # Build plan (if your lookup function is needed, pass it through)
+        plan = build_video_plan(words)  # or build_video_plan(words, lookup_sign_urls_for_word)
+
+        # Render final mp4 to the same static_dir your web app serves
         out_path = os.path.join(static_dir, f"output_{job_id}.mp4")
         generate_merged_video(plan, out_path)
 
-        video_jobs[job_id] = {"status": "ready", "transcript": transcript}
+        # 🔑 Tell the frontend where to load it
+        rel_url = f"/videos/output_{job_id}.mp4"   # must match the mount in main.py
+        video_jobs[job_id] = {"status": "ready", "transcript": transcript, "video_url": rel_url}
         logging.info(f"✅ [{job_id}] Done, video at {out_path}")
+
     except Exception as e:
         logging.error(f"❌ [{job_id}] Failed: {e}")
         logging.debug("Traceback:\n" + traceback.format_exc())
