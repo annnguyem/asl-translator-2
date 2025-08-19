@@ -287,10 +287,10 @@ def video_status(job_id: str):
     if not job:
         return {"status": "not_found"}
     if job.get("status") == "ready":
-        url = job.get("video_url") or f"/videos/output_{job_id}.mp4"  # <-- use /videos
+        url = job.get("video_url") or f"/videos/output_{job_id}.mp4"
         return {
             "status": "ready",
-            "video_url": url,   # <-- RETURN url here
+            "video_url": url,
             "transcript": job.get("transcript", ""),
         }
     if job.get("status") == "error":
