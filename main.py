@@ -322,7 +322,7 @@ def debug_ffmpeg():
         clip = ColorClip((320, 240), color=(0, 0, 0), duration=1)
         clip.write_videofile(out, codec="libx264", fps=24, audio=False, verbose=False, logger=None)
         clip.close()
-         return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
+        return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
     except Exception as e:
         logging.exception("ffmpeg test failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
