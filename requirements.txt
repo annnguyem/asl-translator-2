@@ -1,9 +1,9 @@
-setuptools<81
 fastapi
-uvicorn
-moviepy==2.2.1
+uvicorn[standard]
 python-multipart
 pydantic
-gdown
-pillow==11.2.1 --only-binary :all:
-imageio-ffmpeg>=0.4.5
+requests
+moviepy>=1.0.3,<2
+imageio
+imageio-ffmpeg
+numpy
