@@ -1,109 +1,121 @@
-import os
-import io
-import string
-import base64
-import traceback
-import requests
-import uuid
-import multiprocessing
-
-from fastapi import Query, FastAPI
+# app.py
+import os, io, string, base64, uuid, traceback, requests, threading
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from time import time, sleep
-from worker import process_audio_worker
-
-multiprocessing.set_start_method("spawn", force=True)
 
 STATIC_DIR = "static_output"
 os.makedirs(STATIC_DIR, exist_ok=True)
 
-# 🚀 FastAPI app setup
 app = FastAPI()
-ASSEMBLYAI_API_KEY = 'dbb3ea03ff1a43468beef535573eb703'
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+# ✅ serve files we create
+app.mount("/videos", StaticFiles(directory=STATIC_DIR, html=False), name="videos")
 
-# In-memory job status storage
-manager = multiprocessing.Manager()
-video_jobs = manager.dict()
+from worker import process_audio_worker  # after STATIC_DIR is defined
 
-# 🔤 Utilities
-def strip_punctuation(text):
-    return text.translate(str.maketrans("", "", string.punctuation)).lower()
+# ---- helpers ----
+def strip_punctuation(text): return text.translate(str.maketrans("", "", string.punctuation)).lower()
 
-def get_asl_video_url(word):
+def get_asl_video_url(token: str):
     try:
-        response = requests.get(f"https://signasl.org/api/sign/{word}")
-        response.raise_for_status()
-        results = response.json()
-        if results and isinstance(results, list):
-            return results[0].get("video_url")
+        r = requests.get(f"https://signasl.org/api/sign/{token}", timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list) and data:
+            return data[0].get("video_url")
     except Exception as e:
-        print(f"❌ Failed to get video for '{word}': {e}")
+        print(f"ASL lookup failed for '{token}': {e}")
     return None
 
-def translate_text_to_sign(sentence):
-    clean_sentence = strip_punctuation(sentence)
-    words = clean_sentence.split()
-
+def translate_text_to_sign(sentence: str):
+    words = strip_punctuation(sentence or "").split()
     urls = []
-    for word in words:
-        url = get_asl_video_url(word)
-        if url:
-            urls.append(url)
-        else:
-            for letter in word:
-                letter_url = get_asl_video_url(letter)
-                if letter_url:
-                    urls.append(letter_url)
+    for w in words:
+        u = get_asl_video_url(w)
+        if u: urls.append(u); continue
+        for ch in w:
+            cu = get_asl_video_url(ch)
+            if cu: urls.append(cu)
     return urls
 
-# 📅 Base64 audio endpoint
+def decode_data_uri(s: str) -> bytes:
+    s = (s or "").strip()
+    if s.startswith("data:"):
+        s = s.split(",", 1)[1] if "," in s else ""
+    s = s.replace("\n","").replace("\r","").replace(" ","")
+    # handle missing padding
+    s += "=" * ((4 - len(s) % 4) % 4)
+    return base64.b64decode(s)
+
+# ---- routes ----
 class AudioPayload(BaseModel):
     filename: str
     content_base64: str
 
+# in-memory store (single process/instance)
+video_jobs = {}
+
 @app.post("/translate_audio/", status_code=200)
 async def translate_audio(data: AudioPayload):
     job_id = str(uuid.uuid4())
-    video_jobs[job_id] = {"status": "processing", "video_urls": [], "transcript": ""}
+    video_jobs[job_id] = {"status": "processing", "transcript": ""}
 
-    temp_audio_path = f"temp_{data.filename}"
-    audio_bytes = base64.b64decode(data.content_base64)
+    audio_bytes = decode_data_uri(data.content_base64)
+    ext = os.path.splitext(data.filename or "")[1].lower() or ".mp3"
+    temp_audio_path = f"temp_{job_id}{ext}"
     with open(temp_audio_path, "wb") as f:
         f.write(audio_bytes)
 
-    print(f"📥 Received audio file: {data.filename}")
-
-    import threading
     threading.Thread(
         target=process_audio_worker,
-        args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign),
-        daemon=True
+        args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign, STATIC_DIR),
+        daemon=True,
     ).start()
 
     return {"job_id": job_id}
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
-    if job_id in video_jobs:
-        job = video_jobs[job_id]
+    job = video_jobs.get(job_id)
+    if not job:
+        return {"status": "not_found"}
+    if job.get("status") == "ready":
+        # ✅ return the single merged file URL
         return {
-            "status": job["status"],
-            "video_urls": job.get("video_urls", []),
+            "status": "ready",
+            "video_url": job.get("video_url"),
             "transcript": job.get("transcript", "")
         }
-    return {"status": "not_found"}
+    if job.get("status") == "error":
+        return {"status": "error", "error": job.get("error")}
+    return {"status": "processing"}
 
 @app.get("/")
 def health_check():
-    print("✅ Health check OK")
     return {"status": "ok"}
+
+# optional: quick ffmpeg sanity
+@app.get("/debug_ffmpeg")
+def debug_ffmpeg():
+    import subprocess, shutil
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return JSONResponse(status_code=500, content={"ok": False, "error": "ffmpeg not found"})
+    out = os.path.join(STATIC_DIR, "ffmpeg_test.mp4")
+    cmd = [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=1",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", out]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
