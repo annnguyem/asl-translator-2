@@ -21,7 +21,7 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 # 🚀 FastAPI app setup
 app = FastAPI()
-ASSEMBLYAI_API_KEY = 'your_assemblyai_key_here'
+ASSEMBLYAI_API_KEY = 'dbb3ea03ff1a43468beef535573eb703'
 
 app.add_middleware(
     CORSMiddleware,
