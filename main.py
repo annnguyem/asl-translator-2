@@ -58,52 +58,82 @@ def _strip_punct(t: str) -> str:
 _SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
 
 @lru_cache(maxsize=4096)
-def _fetch_signasl_urls_for_token(token: str) -> List[str]:
+_SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
+
+def _strip_punct(t: str) -> str:
+    import string
+    return t.translate(str.maketrans("", "", string.punctuation)).lower()
+
+@lru_cache(maxsize=4096)
+def _fetch_signasl_urls_for_token(token: str):
     """
-    Try JSON first on each base, then scrape the HTML /sign/<token> page for mp4/webm sources.
-    Returns absolute URLs (deduped).
+    Try JSON first on both www/signasl bases (with browser-like headers), then
+    scrape the HTML page for any .mp4/.webm URLs (absolute or relative).
     """
     token = _strip_punct(token or "")
     if not token:
         return []
 
-    found: List[str] = []
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.signasl.org/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
 
-    # 1) JSON API (not always available)
+    found = []
+
+    # 1) JSON API (if available)
     for base in _SIGNASL_BASES:
+        url = urljoin(base, f"api/sign/{token}")
         try:
-            rj = requests.get(urljoin(base, f"api/sign/{token}"), timeout=8)
+            rj = sess.get(url, timeout=8, allow_redirects=True)
             if rj.ok:
                 data = rj.json()
                 if isinstance(data, list):
                     for item in data:
                         u = (item or {}).get("video_url")
-                        if u:
-                            found.append(u)
+                        if u: found.append(u)
         except Exception as e:
-            logging.debug("JSON lookup %s failed for %r: %s", base, token, e)
+            logging.debug("JSON %s failed (%s): %s", url, token, e)
 
-    if found:
-        seen, out = set(), []
-        for u in found:
-            if u not in seen:
-                out.append(u); seen.add(u)
-        return out
+    # 2) HTML scrape fallback
+    #    a) attributes: src= / data-src= / srcset=
+    #    b) any absolute http(s)://...(.mp4|.webm) anywhere in the markup
+    attr_re = re.compile(
+        r'(?:src|data-src|srcset)=["\']([^"\']+?\.(?:mp4|webm)(?:\?[^"\']*)?)["\']',
+        re.IGNORECASE,
+    )
+    abs_re = re.compile(
+        r'https?://[^\s"\'<>]+?\.(?:mp4|webm)\b', re.IGNORECASE
+    )
 
-    # 2) HTML scrape for <video>/<source> src or data-src (.mp4 / .webm)
-    src_regex = re.compile(r'(?:src|data-src)=["\']([^"\']+?\.(?:mp4|webm))(?:\?[^"\']*)?["\']', re.IGNORECASE)
     for base in _SIGNASL_BASES:
+        page = urljoin(base, f"sign/{token}")
         try:
-            rh = requests.get(urljoin(base, f"sign/{token}"), timeout=8)
+            rh = sess.get(page, timeout=8, allow_redirects=True)
             if not rh.ok:
                 continue
             html = rh.text
-            for m in src_regex.findall(html):
-                found.append(urljoin(base, m))
-        except Exception as e:
-            logging.debug("HTML scrape %s failed for %r: %s", base, token, e)
 
-    # de-dupe preserve order
+            # attribute-based matches (may be relative)
+            for m in attr_re.findall(html):
+                found.append(urljoin(base, m))
+
+            # absolute URLs anywhere in the document
+            for m in abs_re.findall(html):
+                found.append(m)
+        except Exception as e:
+            logging.debug("HTML %s failed (%s): %s", page, token, e)
+
+    # de-dupe, preserve order
     seen, out = set(), []
     for u in found:
         if u not in seen:
