@@ -93,17 +93,15 @@ def transcribe_with_assemblyai(audio_path: str) -> str:
         if st == "error":
             raise RuntimeError(f"AssemblyAI error: {d.get('error')}")
         time.sleep(2)
-
-
-# ---------------------------- Video ------------------------------------
-attr_re = re.compile(
-    r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
-    re.IGNORECASE,
-)
-abs_re = re.compile(
-    r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b',
-    re.IGNORECASE,
-)
+    # ---------------------------- Video ------------------------------------
+    attr_re = re.compile(
+        r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
+        re.IGNORECASE,
+    )
+    abs_re = re.compile(
+        r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b',
+        re.IGNORECASE,
+    )
 
 def _concat_with_filter(inputs: List[str], output_path: str):
     """
