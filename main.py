@@ -147,3 +147,83 @@ class AudioPayload(BaseModel):
 async def translate_audio(data: AudioPayload):
     job_id = str(uuid.uuid4())
     video_jobs[job_id] = {"status": "processing", "transcript": ""}
+
+    try:
+        audio_bytes = decode_data_uri(data.content_base64)
+    except Exception as e:
+        video_jobs[job_id] = {"status": "error", "error": "Invalid base64"}
+        return JSONResponse(status_code=400, content={"status": "error", "error": "Invalid base64"})
+
+    ext = os.path.splitext(data.filename or "")[1].lower()
+    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".mp4"}:
+        ext = ".mp3"
+    temp_audio_path = "temp_%s%s" % (job_id, ext)
+    with open(temp_audio_path, "wb") as f:
+        f.write(audio_bytes)
+
+    # background worker in same process
+    from worker import process_audio_worker
+    threading.Thread(
+        target=process_audio_worker,
+        args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign, STATIC_DIR),
+        daemon=True,
+    ).start()
+
+    return {"job_id": job_id}
+
+@app.get("/video_status/{job_id}")
+def video_status(job_id: str):
+    job = video_jobs.get(job_id)
+    if not job:
+        return {"status": "not_found"}
+    if job.get("status") == "ready":
+        return {
+            "status": "ready",
+            "video_url": job.get("video_url"),
+            "transcript": job.get("transcript", ""),
+        }
+    if job.get("status") == "error":
+        return {"status": "error", "error": job.get("error")}
+    return {"status": "processing"}
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+# -------------------- Optional debug endpoints --------------------
+@app.get("/debug_ffmpeg")
+def debug_ffmpeg():
+    import subprocess, shutil
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return JSONResponse(status_code=500, content={"ok": False, "error": "ffmpeg not found"})
+    out = os.path.join(STATIC_DIR, "ffmpeg_test.mp4")
+    cmd = [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=1",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", out]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+@app.get("/debug_aai_key")
+def debug_aai_key():
+    key = os.getenv("ASSEMBLYAI_API_KEY")
+    if not key:
+        return {"ok": False, "error": "ASSEMBLYAI_API_KEY not set"}
+    r = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers={"Authorization": key, "Content-Type": "application/json"},
+        json={"audio_url": "https://example.com/does-not-exist.mp3"},
+        timeout=10,
+    )
+    return {"ok": r.status_code != 401, "status": r.status_code, "body": r.text[:160]}
+
+@app.get("/debug_signasl/{token}")
+def debug_signasl(token: str):
+    urls = _fetch_signasl_urls_for_token(token)
+    return {"token": token, "count": len(urls), "urls": urls[:10]}
