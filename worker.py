@@ -48,18 +48,14 @@ def _browser_session() -> requests.Session:
 
 
 # ----------------------------- AssemblyAI ---------------------------------
-def transcribe_with_assemblyai(audio_path: str) -> Dict[str, Any]:
-    """
-    Uploads audio to AssemblyAI, creates a transcript, polls until complete.
-    Returns {'text': str, 'words': [{'text','start','end'}, ...]}
-    """
+def transcribe_with_assemblyai(audio_path: str) -> dict:
     key = _aai_key()
 
-    # 1) Upload (streaming)
+    # --- 1) Upload raw bytes ---
     with open(audio_path, "rb") as f:
         up = requests.post(
             "https://api.assemblyai.com/v2/upload",
-            headers={"Authorization": key},
+            headers={"authorization": key, "content-type": "application/octet-stream"},
             data=f,
             timeout=60,
         )
@@ -67,29 +63,31 @@ def transcribe_with_assemblyai(audio_path: str) -> Dict[str, Any]:
         raise RuntimeError(f"Upload failed: {up.status_code} {up.text[:300]}")
     upload_url = up.json()["upload_url"]
 
-    # 2) Create transcript
+    # --- 2) Create transcript (minimal schema first) ---
+    body = {
+        "audio_url": upload_url,   # REQUIRED
+        # Add extras later once working:
+        # "punctuate": True,
+        # "format_text": True,
+        # "dual_channel": os.getenv("AAI_DUAL_CHANNEL", "false").lower() in ("1","true","yes"),
+    }
     tr = requests.post(
         "https://api.assemblyai.com/v2/transcript",
-        headers={"Authorization": key, "Content-Type": "application/json"},
-        json={
-            "audio_url": upload_url,
-            "punctuate": True,
-            "format_text": True,
-            "speaker_labels": False,
-            "dual_channel": (os.getenv("AAI_DUAL_CHANNEL", "false").lower() in ("1", "true", "yes")),
-            "words": True,
-        },
+        headers={"authorization": key, "content-type": "application/json"},
+        json=body,
         timeout=30,
     )
     if not tr.ok:
-        raise RuntimeError(f"Transcript create failed: {tr.status_code} {tr.text[:300]}")
+        # Surface the exact server message so you can see what's wrong
+        raise RuntimeError(f"Transcript create failed: {tr.status_code} {tr.text}")
+
     tid = tr.json()["id"]
 
-    # 3) Poll
+    # --- 3) Poll until complete ---
     while True:
         r = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{tid}",
-            headers={"Authorization": key},
+            headers={"authorization": key},
             timeout=30,
         )
         r.raise_for_status()
@@ -100,7 +98,6 @@ def transcribe_with_assemblyai(audio_path: str) -> Dict[str, Any]:
         if st == "error":
             raise RuntimeError(f"AssemblyAI error: {d.get('error')}")
         time.sleep(2)
-
 
 # ----------------------------- Video utils --------------------------------
 def _download_media(url: str) -> str:
