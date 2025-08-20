@@ -1,16 +1,4 @@
 # signals.py
-"""
-SignASL clip finder.
-
-- fetch_signasl_urls(token)  -> list[str] of direct media URLs (mp4/webm/m3u8)
-- lookup_sign_urls_for_word(word) -> 1-2 good URLs for a word, else fingerspelling
-- translate_text_to_sign(sentence) -> URLs for a whole sentence
-
-Enable headless browser fallback by setting env: USE_BROWSER=1
-(Requires Playwright + Chromium installed in your deploy.)
-"""
-from __future__ import annotations
-
 import os
 import re
 import string
@@ -19,15 +7,11 @@ from urllib.parse import urljoin
 
 import requests
 
-
-# ------------------------- config -------------------------
 _SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
 _USE_BROWSER = os.getenv("USE_BROWSER", "0").lower() in ("1", "true", "yes")
 
-
 def _strip_punct(t: str) -> str:
     return (t or "").translate(str.maketrans("", "", string.punctuation)).lower().strip()
-
 
 def _browser_session() -> requests.Session:
     s = requests.Session()
@@ -45,17 +29,14 @@ def _browser_session() -> requests.Session:
     })
     return s
 
-
-# ------------------------- HTTP scrape (fast path) -------------------------
 def _fetch_signasl_urls_http(token: str) -> list[str]:
     token = _strip_punct(token)
     if not token:
         return []
-
     sess = _browser_session()
     found: list[str] = []
 
-    # 1) JSON API (some tokens return a list of {video_url: ...})
+    # JSON API (if exposed)
     for base in _SIGNASL_BASES:
         api = urljoin(base, f"api/sign/{token}")
         try:
@@ -68,9 +49,9 @@ def _fetch_signasl_urls_http(token: str) -> list[str]:
                         if u:
                             found.append(u)
         except Exception:
-            pass  # fall through to HTML
+            pass
 
-    # 2) HTML: look for mp4/webm/m3u8 declared in attributes or inline URLs
+    # HTML scrape (mp4/webm/m3u8)
     attr_re = re.compile(
         r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
         re.IGNORECASE,
@@ -84,25 +65,20 @@ def _fetch_signasl_urls_http(token: str) -> list[str]:
             if not rh.ok:
                 continue
             html = rh.text
-            # relative paths from attributes
             for m in attr_re.findall(html):
                 found.append(urljoin(base, m))
-            # absolute URLs
             for m in abs_re.findall(html):
                 found.append(m)
         except Exception:
             pass
 
-    # de-dupe preserve order
+    # de-dupe
     seen, out = set(), []
     for u in found:
         if u not in seen:
-            out.append(u)
-            seen.add(u)
+            out.append(u); seen.add(u)
     return out
 
-
-# ------------------------- Browser scrape (fallback) -------------------------
 def _fetch_signasl_urls_browser(token: str) -> list[str]:
     if not _USE_BROWSER:
         return []
@@ -115,10 +91,10 @@ def _fetch_signasl_urls_browser(token: str) -> list[str]:
     if not token:
         return []
 
-    out: list[str] = []
+    hits: list[str] = []
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             ctx = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -129,82 +105,32 @@ def _fetch_signasl_urls_browser(token: str) -> list[str]:
                 ignore_https_errors=True,
             )
             page = ctx.new_page()
+
+            # Sniff media responses (mp4/webm/m3u8, or video content-types)
+            def on_response(resp):
+                try:
+                    url = resp.url
+                    if url.startswith("blob:"):
+                        return
+                    ct = (resp.headers or {}).get("content-type", "").lower()
+                    if (
+                        any(ext in url.lower() for ext in (".mp4", ".webm", ".m3u8"))
+                        or "video/" in ct
+                        or "vnd.apple.mpegurl" in ct
+                        or "mpegurl" in ct
+                    ):
+                        hits.append(url)
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
             for base in _SIGNASL_BASES:
                 url = urljoin(base, f"sign/{token}")
                 try:
                     page.goto(url, wait_until="networkidle", timeout=20000)
-                    page.wait_for_timeout(600)  # give their JS a moment
+                    page.wait_for_timeout(800)
 
-                    # Collect from <video> and <source>
-                    urls = page.eval_on_selector_all(
+                    # DOM sources as backup
+                    dom_urls = page.eval_on_selector_all(
                         "video, video source, source",
-                        """els => els.map(e => e.currentSrc || e.src || e.getAttribute('src') || e.getAttribute('data-src') || '')"""
-                    )
-                    for u in urls or []:
-                        if u:
-                            out.append(urljoin(base, u))
-                except Exception:
-                    continue
-            browser.close()
-    except Exception:
-        return []
-
-    # keep only media we can handle
-    media_re = re.compile(r'\.(mp4|webm|m3u8)(?:\?|$)', re.IGNORECASE)
-    out = [u for u in out if media_re.search(u)]
-
-    # de-dupe
-    seen, dedup = set(), []
-    for u in out:
-        if u not in seen:
-            dedup.append(u); seen.add(u)
-    return dedup
-
-
-# ------------------------- Public helpers -------------------------
-@lru_cache(maxsize=4096)
-def fetch_signasl_urls(token: str) -> list[str]:
-    """
-    Try HTTP scrape first; if none, try headless browser (when enabled).
-    """
-    urls = _fetch_signasl_urls_http(token)
-    if urls:
-        return urls
-    return _fetch_signasl_urls_browser(token)
-
-
-def lookup_sign_urls_for_word(word: str) -> list[str]:
-    """
-    Return 1–2 clips for a word. If none, fall back to letters (max ~6 clips).
-    """
-    urls = fetch_signasl_urls(word)
-    if urls:
-        return urls[:2]
-
-    out: list[str] = []
-    for ch in _strip_punct(word):
-        u = fetch_signasl_urls(ch)
-        if u:
-            out.append(u[0])
-        if len(out) >= 6:
-            break
-    return out
-
-
-def translate_text_to_sign(sentence: str) -> list[str]:
-    """
-    Convenience: return a flat list of URLs for the whole sentence.
-    (Your worker still builds a per-word timing plan.)
-    """
-    tokens = _strip_punct(sentence).split()
-    urls: list[str] = []
-    for t in tokens:
-        urls += lookup_sign_urls_for_word(t)
-    return urls
-
-
-# -------------- tiny CLI for manual tests --------------
-if __name__ == "__main__":
-    for tok in ["you", "love", "i"]:
-        hits = fetch_signasl_urls(tok)
-        print(tok, len(hits), hits[:3])
