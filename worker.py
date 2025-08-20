@@ -3,7 +3,7 @@ import os
 import requests
 import time
 
-ASSEMBLYAI_API_KEY = "your_assemblyai_key_here"
+ASSEMBLYAI_API_KEY = "dbb3ea03ff1a43468beef535573eb703"
 
 def transcribe_with_assemblyai(audio_path):
     headers = {'authorization': ASSEMBLYAI_API_KEY}
