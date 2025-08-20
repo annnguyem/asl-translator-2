@@ -41,4 +41,180 @@ video_jobs: Dict[str, Dict[str, Any]] = {}
 # ─────────────────────────── Helpers ───────────────────────────────
 def decode_data_uri(s: str) -> bytes:
     """
-    Accepts raw base64 or data URLs. Handles url-encoding, urlsa
+    Accepts raw base64 or data URLs. Handles url-encoding, urlsafe chars,
+    whitespace, and padding.
+    """
+    s = (s or "").strip()
+    if s.startswith("data:"):
+        parts = s.split(",", 1)
+        s = parts[1] if len(parts) == 2 else ""
+    s = unquote(s)
+    s = s.replace("\n", "").replace("\r", "").replace(" ", "")
+    s = s.replace("-", "+").replace("_", "/")
+    s = re.sub(r"[^A-Za-z0-9+/=]", "", s)
+    s += "=" * ((4 - len(s) % 4) % 4)
+    return base64.b64decode(s)
+
+def _strip_punct(t: str) -> str:
+    return t.translate(str.maketrans("", "", string.punctuation)).lower()
+
+@lru_cache(maxsize=4096)
+def _fetch_signasl_urls_for_token(token: str) -> List[str]:
+    """
+    Try JSON first, then scrape the HTML /sign/<token> page for mp4 <source> URLs.
+    Returns a list of absolute video URLs (may contain several variants).
+    """
+    token = _strip_punct(token or "")
+    if not token:
+        return []
+
+    urls: List[str] = []
+
+    # 1) JSON API (present on some deployments)
+    try:
+        rj = requests.get(f"https://www.signasl.org/api/sign/{token}", timeout=8)
+        if rj.ok:
+            data = rj.json()
+            if isinstance(data, list):
+                for item in data:
+                    u = (item or {}).get("video_url")
+                    if u:
+                        urls.append(u)
+    except Exception:
+        pass  # fall through to HTML
+
+    if urls:
+        # de-dupe
+        seen, uniq = set(), []
+        for u in urls:
+            if u not in seen:
+                uniq.append(u); seen.add(u)
+        return uniq
+
+    # 2) HTML scrape fallback
+    try:
+        rh = requests.get(f"https://www.signasl.org/sign/{token}", timeout=8)
+        if rh.ok:
+            html = rh.text
+            # capture .mp4 sources (absolute or relative)
+            for m in re.findall(r'src=["\']([^"\']+?\.mp4)(?:\?[^"\']*)?["\']', html, flags=re.IGNORECASE):
+                urls.append(urljoin("https://www.signasl.org/", m))
+    except Exception:
+        pass
+
+    # de-dupe preserve order
+    seen, uniq = set(), []
+    for u in urls:
+        if u not in seen:
+            uniq.append(u); seen.add(u)
+    return uniq
+
+def translate_text_to_sign(sentence: str) -> List[str]:
+    """
+    Build a list of clip URLs for the transcript. Word-first, then letters fallback.
+    """
+    words = _strip_punct(sentence or "").split()
+    out: List[str] = []
+
+    for w in words:
+        hits = _fetch_signasl_urls_for_token(w)
+        if hits:
+            out.extend(hits)
+            continue
+        # fallback to letters
+        for ch in w:
+            hits_ch = _fetch_signasl_urls_for_token(ch)
+            if hits_ch:
+                out.extend(hits_ch)
+    return out
+
+# ─────────────────────────── Schema ────────────────────────────────
+class AudioPayload(BaseModel):
+    filename: str
+    content_base64: str  # data:...;base64,... or raw base64
+
+# ─────────────────────────── Routes ────────────────────────────────
+@app.post("/translate_audio/", status_code=200)
+async def translate_audio(data: AudioPayload):
+    """
+    Kick off a job. Body: { filename, content_base64 }
+    Returns: { job_id }
+    """
+    job_id = str(uuid.uuid4())
+    video_jobs[job_id] = {"status": "processing", "transcript": ""}
+
+    try:
+        audio_bytes = decode_data_uri(data.content_base64)
+    except Exception as e:
+        video_jobs[job_id] = {"status": "error", "error": f"Invalid base64: {e}"}
+        return JSONResponse(status_code=400, content={"status": "error", "error": "Invalid base64"})
+
+    ext = os.path.splitext(data.filename or "")[1].lower()
+    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".mp4"}:
+        ext = ".mp3"
+    temp_audio_path = f"temp_{job_id}{ext}"
+    with open(temp_audio_path, "wb") as f:
+        f.write(audio_bytes)
+
+    # Start the background worker in a thread (same process → same memory)
+    from worker import process_audio_worker  # late import to avoid circulars
+    threading.Thread(
+        target=process_audio_worker,
+        args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign, STATIC_DIR),
+        daemon=True,
+    ).start()
+
+    return {"job_id": job_id}
+
+@app.get("/video_status/{job_id}")
+def video_status(job_id: str):
+    job = video_jobs.get(job_id)
+    if not job:
+        return {"status": "not_found"}
+    if job.get("status") == "ready":
+        return {
+            "status": "ready",
+            "video_url": job.get("video_url"),  # singular field your poller expects
+            "transcript": job.get("transcript", "")
+        }
+    if job.get("status") == "error":
+        return {"status": "error", "error": job.get("error")}
+    return {"status": "processing"}
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+# ───────────── Optional debug: ffmpeg and AssemblyAI key ───────────
+@app.get("/debug_ffmpeg")
+def debug_ffmpeg():
+    import subprocess, shutil
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return JSONResponse(status_code=500, content={"ok": False, "error": "ffmpeg not found"})
+    out = os.path.join(STATIC_DIR, "ffmpeg_test.mp4")
+    cmd = [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=1",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", out]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+@app.get("/debug_aai_key")
+def debug_aai_key():
+    key = os.getenv("ASSEMBLYAI_API_KEY")
+    if not key:
+        return {"ok": False, "error": "ASSEMBLYAI_API_KEY not set"}
+    r = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers={"Authorization": key, "Content-Type": "application/json"},
+        json={"audio_url": "https://example.com/does-not-exist.mp3"},
+        timeout=10,
+    )
+    # 400 => key accepted (bad request due to fake URL). 401 => invalid key.
+    return {"ok": r.status_code != 401, "status": r.status_code, "body": r.text[:160]}
