@@ -96,9 +96,14 @@ def _fetch_signasl_urls_for_token(token):
             logging.debug("JSON %s failed (%s): %s", url, token, e)
 
     # 2) HTML scrape
-    attr_re = re.compile(r'(?:src|data-src|srcset)=["\']([^"\']+?\.(?:mp4|webm)(?:\?[^"\']*)?)["\']', re.IGNORECASE)
-    abs_re = re.compile(r'https?://[^\s"\'<>]+?\.(?:mp4|webm)\b', re.IGNORECASE)
-
+   attr_re = re.compile(
+    r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
+    re.IGNORECASE,
+    )
+    abs_re = re.compile(
+        r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b',
+        re.IGNORECASE,
+    )
     for base in _SIGNASL_BASES:
         page = urljoin(base, "sign/" + token)
         try:
