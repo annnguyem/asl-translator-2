@@ -252,6 +252,7 @@ async def translate_audio(data: AudioPayload):
     try:
         job_id = str(uuid.uuid4())
         video_jobs[job_id] = {"status": "processing", "transcript": ""}
+        logging.info("CREATE job %s; known_jobs=%d", job_id, len(video_jobs))
 
         ext = os.path.splitext(data.filename or "")[1].lower()
         if ext not in {".mp3", ".wav", ".m4a", ".aac", ".mp4"}:
@@ -283,6 +284,7 @@ async def translate_audio(data: AudioPayload):
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
+    logging.info("STATUS %s; known_jobs=%s", job_id, list(video_jobs.keys())[:10])
     job = video_jobs.get(job_id)
     if not job:
         return {"status": "not_found"}
