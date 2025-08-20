@@ -173,4 +173,38 @@ def fetch_signasl_urls(token: str) -> list[str]:
     return _fetch_signasl_urls_browser(token)
 
 
-def lookup_sign_urls_for_word(word:
+def lookup_sign_urls_for_word(word: str) -> list[str]:
+    """
+    Return 1–2 clips for a word. If none, fall back to letters (max ~6 clips).
+    """
+    urls = fetch_signasl_urls(word)
+    if urls:
+        return urls[:2]
+
+    out: list[str] = []
+    for ch in _strip_punct(word):
+        u = fetch_signasl_urls(ch)
+        if u:
+            out.append(u[0])
+        if len(out) >= 6:
+            break
+    return out
+
+
+def translate_text_to_sign(sentence: str) -> list[str]:
+    """
+    Convenience: return a flat list of URLs for the whole sentence.
+    (Your worker still builds a per-word timing plan.)
+    """
+    tokens = _strip_punct(sentence).split()
+    urls: list[str] = []
+    for t in tokens:
+        urls += lookup_sign_urls_for_word(t)
+    return urls
+
+
+# -------------- tiny CLI for manual tests --------------
+if __name__ == "__main__":
+    for tok in ["you", "love", "i"]:
+        hits = fetch_signasl_urls(tok)
+        print(tok, len(hits), hits[:3])
