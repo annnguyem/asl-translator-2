@@ -84,21 +84,21 @@ class AudioPayload(BaseModel):
 # -------------------- Routes --------------------
 @app.post("/translate_audio/", status_code=200)
 async def translate_audio(data: AudioPayload):
-    """
-    Accepts base64 (or data URL) audio and kicks off a background job that:
-    - transcribes via AssemblyAI
-    - fetches SignASL clips per word
-    - concatenates to a single MP4 in /videos/output_<job_id>.mp4
-    """
     job_id = str(uuid.uuid4())
 
+    # Initialize job state in memory + disk so polling can always find it
+    init = {"status": "processing", "transcript": ""}
+    video_jobs[job_id] = init
+    write_job(job_id, init)
+
+    # Decode audio; if it fails, mark job as error but STILL return job_id
     try:
         audio_bytes = decode_data_uri(data.content_base64)
-    except Exception:
-        payload = {"status": "error", "error": "Invalid base64"}
-        video_jobs[job_id] = payload
-        write_job(job_id, payload)
-        return JSONResponse(status_code=400, content=payload)
+    except Exception as e:
+        err = {"status": "error", "error": f"Invalid base64: {e}"}
+        video_jobs[job_id] = err
+        write_job(job_id, err)
+        return {"job_id": job_id, "status": "error"}  # ✅ UI can still poll and see error
 
     ext = os.path.splitext(data.filename or "")[1].lower()
     if ext not in {".mp3", ".wav", ".m4a", ".aac", ".mp4"}:
@@ -107,14 +107,8 @@ async def translate_audio(data: AudioPayload):
     with open(temp_audio_path, "wb") as f:
         f.write(audio_bytes)
 
-    # Initialize job state (both memory and disk)
-    init = {"status": "processing", "transcript": ""}
-    video_jobs[job_id] = init
-    write_job(job_id, init)
-
-    # Start the background worker
     from worker import process_audio_worker
-    from signals import translate_text_to_sign  # sentence -> list[str] of clip URLs
+    from signals import translate_text_to_sign
 
     threading.Thread(
         target=process_audio_worker,
@@ -122,7 +116,7 @@ async def translate_audio(data: AudioPayload):
         daemon=True,
     ).start()
 
-    return {"job_id": job_id}
+    return {"job_id": job_id}  # ✅ always present
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
