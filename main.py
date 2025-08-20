@@ -7,7 +7,7 @@ import string
 import logging
 import threading
 from functools import lru_cache
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import unquote, urljoin
 
 import requests
@@ -32,7 +32,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# serve final mp4s from here
+# Serve your generated mp4s
 app.mount("/videos", StaticFiles(directory=STATIC_DIR, html=False), name="videos")
 
 # In-memory job store — run a single process/instance
@@ -40,10 +40,7 @@ video_jobs: Dict[str, Dict[str, Any]] = {}
 
 # ─────────────────────────── Helpers ───────────────────────────────
 def decode_data_uri(s: str) -> bytes:
-    """
-    Accepts raw base64 or data URLs. Handles url-encoding, urlsafe chars,
-    whitespace, and padding.
-    """
+    """Accepts raw base64 or data URLs; fixes padding and url-encoding."""
     s = (s or "").strip()
     if s.startswith("data:"):
         parts = s.split(",", 1)
@@ -58,56 +55,60 @@ def decode_data_uri(s: str) -> bytes:
 def _strip_punct(t: str) -> str:
     return t.translate(str.maketrans("", "", string.punctuation)).lower()
 
+_SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
+
 @lru_cache(maxsize=4096)
 def _fetch_signasl_urls_for_token(token: str) -> List[str]:
     """
-    Try JSON first, then scrape the HTML /sign/<token> page for mp4 <source> URLs.
-    Returns a list of absolute video URLs (may contain several variants).
+    Try JSON first on each base, then scrape the HTML /sign/<token> page for mp4/webm sources.
+    Returns absolute URLs (deduped).
     """
     token = _strip_punct(token or "")
     if not token:
         return []
 
-    urls: List[str] = []
+    found: List[str] = []
 
-    # 1) JSON API (present on some deployments)
-    try:
-        rj = requests.get(f"https://www.signasl.org/api/sign/{token}", timeout=8)
-        if rj.ok:
-            data = rj.json()
-            if isinstance(data, list):
-                for item in data:
-                    u = (item or {}).get("video_url")
-                    if u:
-                        urls.append(u)
-    except Exception:
-        pass  # fall through to HTML
+    # 1) JSON API (not always available)
+    for base in _SIGNASL_BASES:
+        try:
+            rj = requests.get(urljoin(base, f"api/sign/{token}"), timeout=8)
+            if rj.ok:
+                data = rj.json()
+                if isinstance(data, list):
+                    for item in data:
+                        u = (item or {}).get("video_url")
+                        if u:
+                            found.append(u)
+        except Exception as e:
+            logging.debug("JSON lookup %s failed for %r: %s", base, token, e)
 
-    if urls:
-        # de-dupe
-        seen, uniq = set(), []
-        for u in urls:
+    if found:
+        seen, out = set(), []
+        for u in found:
             if u not in seen:
-                uniq.append(u); seen.add(u)
-        return uniq
+                out.append(u); seen.add(u)
+        return out
 
-    # 2) HTML scrape fallback
-    try:
-        rh = requests.get(f"https://www.signasl.org/sign/{token}", timeout=8)
-        if rh.ok:
+    # 2) HTML scrape for <video>/<source> src or data-src (.mp4 / .webm)
+    src_regex = re.compile(r'(?:src|data-src)=["\']([^"\']+?\.(?:mp4|webm))(?:\?[^"\']*)?["\']', re.IGNORECASE)
+    for base in _SIGNASL_BASES:
+        try:
+            rh = requests.get(urljoin(base, f"sign/{token}"), timeout=8)
+            if not rh.ok:
+                continue
             html = rh.text
-            # capture .mp4 sources (absolute or relative)
-            for m in re.findall(r'src=["\']([^"\']+?\.mp4)(?:\?[^"\']*)?["\']', html, flags=re.IGNORECASE):
-                urls.append(urljoin("https://www.signasl.org/", m))
-    except Exception:
-        pass
+            for m in src_regex.findall(html):
+                found.append(urljoin(base, m))
+        except Exception as e:
+            logging.debug("HTML scrape %s failed for %r: %s", base, token, e)
 
     # de-dupe preserve order
-    seen, uniq = set(), []
-    for u in urls:
+    seen, out = set(), []
+    for u in found:
         if u not in seen:
-            uniq.append(u); seen.add(u)
-    return uniq
+            out.append(u); seen.add(u)
+    return out
 
 def translate_text_to_sign(sentence: str) -> List[str]:
     """
@@ -121,7 +122,7 @@ def translate_text_to_sign(sentence: str) -> List[str]:
         if hits:
             out.extend(hits)
             continue
-        # fallback to letters
+        # fallback: letters
         for ch in w:
             hits_ch = _fetch_signasl_urls_for_token(ch)
             if hits_ch:
@@ -156,8 +157,8 @@ async def translate_audio(data: AudioPayload):
     with open(temp_audio_path, "wb") as f:
         f.write(audio_bytes)
 
-    # Start the background worker in a thread (same process → same memory)
-    from worker import process_audio_worker  # late import to avoid circulars
+    # background worker in same process
+    from worker import process_audio_worker  # late import to avoid circular imports
     threading.Thread(
         target=process_audio_worker,
         args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign, STATIC_DIR),
@@ -174,7 +175,7 @@ def video_status(job_id: str):
     if job.get("status") == "ready":
         return {
             "status": "ready",
-            "video_url": job.get("video_url"),  # singular field your poller expects
+            "video_url": job.get("video_url"),
             "transcript": job.get("transcript", "")
         }
     if job.get("status") == "error":
@@ -185,7 +186,7 @@ def video_status(job_id: str):
 def health():
     return {"status": "ok"}
 
-# ───────────── Optional debug: ffmpeg and AssemblyAI key ───────────
+# ───────────── Optional debug helpers ─────────────
 @app.get("/debug_ffmpeg")
 def debug_ffmpeg():
     import subprocess, shutil
@@ -218,3 +219,8 @@ def debug_aai_key():
     )
     # 400 => key accepted (bad request due to fake URL). 401 => invalid key.
     return {"ok": r.status_code != 401, "status": r.status_code, "body": r.text[:160]}
+
+@app.get("/debug_signasl/{token}")
+def debug_signasl(token: str):
+    urls = _fetch_signasl_urls_for_token(token)
+    return {"token": token, "count": len(urls), "urls": urls[:10]}
