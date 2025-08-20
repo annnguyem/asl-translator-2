@@ -96,28 +96,14 @@ def transcribe_with_assemblyai(audio_path: str) -> str:
 
 
 # ---------------------------- Video ------------------------------------
-def _download_clips(urls: List[str]) -> List[str]:
-    """
-    Download each URL to a temp file. Returns list of local paths.
-    Skips failures; returns only successfully downloaded files.
-    """
-    sess = _browser_session()
-    paths: List[str] = []
-    for i, u in enumerate(urls):
-        try:
-            with sess.get(u, timeout=15, stream=True) as resp:
-                resp.raise_for_status()
-                suffix = ".mp4" if ".mp4" in u.lower() else ".webm" if ".webm" in u.lower() else ".mp4"
-                tf = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                for chunk in resp.iter_content(1024 * 64):
-                    if chunk:
-                        tf.write(chunk)
-                tf.close()
-                paths.append(tf.name)
-        except Exception as e:
-            print(f"[download] skip {u}: {e}")
-    return paths
-
+attr_re = re.compile(
+    r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
+    re.IGNORECASE,
+)
+abs_re = re.compile(
+    r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b',
+    re.IGNORECASE,
+)
 
 def _concat_with_filter(inputs: List[str], output_path: str):
     """
