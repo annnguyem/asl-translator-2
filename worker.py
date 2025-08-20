@@ -1,16 +1,17 @@
 # worker.py
 import os
 import time
+import json
 import shutil
 import tempfile
 import subprocess
 import traceback
-from typing import List
+from typing import List, Dict, Any
 
 import requests
 
 
-# ----------------------------- helpers ---------------------------------
+# ----------------------------- Env / tools --------------------------------
 def _aai_key() -> str:
     key = os.getenv("ASSEMBLYAI_API_KEY")
     if not key:
@@ -26,11 +27,9 @@ def _ffmpeg_path() -> str:
         import imageio_ffmpeg  # type: ignore
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        raise RuntimeError(
-            "ffmpeg not found (install system ffmpeg or add `imageio-ffmpeg`)"
-        )
+        raise RuntimeError("ffmpeg not found (install system ffmpeg or add `imageio-ffmpeg`)")
 
-
+# mimic browser for direct downloads
 def _browser_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
@@ -48,14 +47,15 @@ def _browser_session() -> requests.Session:
     return s
 
 
-# -------------------------- AssemblyAI ---------------------------------
-def transcribe_with_assemblyai(audio_path: str) -> str:
+# ----------------------------- AssemblyAI ---------------------------------
+def transcribe_with_assemblyai(audio_path: str) -> Dict[str, Any]:
     """
-    Uploads audio and polls until completed. Returns plain transcript text.
+    Uploads audio to AssemblyAI, creates a transcript, polls until complete.
+    Returns {'text': str, 'words': [{'text','start','end'}, ...]}
     """
     key = _aai_key()
 
-    # 1) Upload (stream body)
+    # 1) Upload (streaming)
     with open(audio_path, "rb") as f:
         up = requests.post(
             "https://api.assemblyai.com/v2/upload",
@@ -71,7 +71,14 @@ def transcribe_with_assemblyai(audio_path: str) -> str:
     tr = requests.post(
         "https://api.assemblyai.com/v2/transcript",
         headers={"Authorization": key, "Content-Type": "application/json"},
-        json={"audio_url": upload_url, "punctuate": True, "format_text": True},
+        json={
+            "audio_url": upload_url,
+            "punctuate": True,
+            "format_text": True,
+            "speaker_labels": False,
+            "dual_channel": (os.getenv("AAI_DUAL_CHANNEL", "false").lower() in ("1", "true", "yes")),
+            "words": True,
+        },
         timeout=30,
     )
     if not tr.ok:
@@ -89,24 +96,66 @@ def transcribe_with_assemblyai(audio_path: str) -> str:
         d = r.json()
         st = d.get("status")
         if st == "completed":
-            return d.get("text", "") or ""
+            return {"text": d.get("text", "") or "", "words": d.get("words", []) or []}
         if st == "error":
             raise RuntimeError(f"AssemblyAI error: {d.get('error')}")
         time.sleep(2)
-    # ---------------------------- Video ------------------------------------
-    attr_re = re.compile(
-        r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
-        re.IGNORECASE,
-    )
-    abs_re = re.compile(
-        r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b',
-        re.IGNORECASE,
-    )
 
-def _concat_with_filter(inputs: List[str], output_path: str):
+
+# ----------------------------- Video utils --------------------------------
+def _download_media(url: str) -> str:
     """
-    Use ffmpeg concat filter to robustly join heterogeneous inputs (mp4/webm,
-    varying sizes/codecs) into a single H.264 MP4.
+    Download a single clip to a temp file.
+    - For .m3u8 (HLS), use ffmpeg to remux/encode into a temp .mp4
+    - For .mp4 / .webm, download bytes directly
+    Returns local file path.
+    """
+    ffmpeg = _ffmpeg_path()
+    lower = url.lower()
+
+    if ".m3u8" in lower:
+        out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        out.close()
+        hdr = (
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36\r\n"
+            "Accept: */*\r\n"
+            "Accept-Language: en-US,en;q=0.9\r\n"
+            "Referer: https://www.signasl.org/\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Pragma: no-cache\r\n"
+        )
+        cmd = [
+            ffmpeg, "-y",
+            "-headers", hdr,
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-i", url,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "24",
+            "-an",
+            out.name,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return out.name
+
+    # direct download for mp4/webm
+    sess = _browser_session()
+    suffix = ".mp4" if lower.endswith(".mp4") else ".webm" if lower.endswith(".webm") else ".mp4"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    with sess.get(url, timeout=20, stream=True) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_content(1024 * 64):
+            if chunk:
+                tmp.write(chunk)
+    tmp.close()
+    return tmp.name
+
+
+def _concat_with_filter(inputs: List[str], output_path: str) -> None:
+    """
+    Robust concatenation using ffmpeg concat filter.
+    - Normalizes fps, pixel format and size.
+    - Handles mixed mp4/webm inputs.
     """
     if not inputs:
         raise RuntimeError("No input files to concat")
@@ -114,9 +163,7 @@ def _concat_with_filter(inputs: List[str], output_path: str):
     ffmpeg = _ffmpeg_path()
 
     # Build filter graph:
-    #   [0:v]fps=24,format=yuv420p,scale=640:-2,setsar=1[v0];
-    #   [1:v]fps=24,format=yuv420p,scale=640:-2,setsar=1[v1];
-    #   [v0][v1]concat=n=2:v=1:a=0[vout]
+    #   [0:v]fps=24,format=yuv420p,scale=640:-2,setsar=1[v0]; ... ; [v0][v1]... concat=n=N:v=1:a=0[vout]
     filters = []
     refs = []
     for idx in range(len(inputs)):
@@ -126,7 +173,7 @@ def _concat_with_filter(inputs: List[str], output_path: str):
 
     cmd = [
         ffmpeg, "-y",
-        *sum([["-i", p] for p in inputs], []),      # -i file1 -i file2 ...
+        *sum([["-i", p] for p in inputs], []),
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-c:v", "libx264",
@@ -142,91 +189,137 @@ def _concat_with_filter(inputs: List[str], output_path: str):
         raise RuntimeError("Video file not written or empty.")
 
 
-def _placeholder_video(output_path: str, text: str = ""):
+def _placeholder_video(output_path: str, text: str = "") -> None:
     """
-    Generate a short black video. Try drawtext; if unavailable, fall back to plain color.
+    Generate a tiny black MP4 with optional centered text. Used only if all clip
+    downloads fail, to keep the UI flow from hanging.
     """
     ffmpeg = _ffmpeg_path()
-    # sanitize text for drawtext
     safe_text = (text or "No ASL clips found").replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
-    # Try with drawtext
-    cmd1 = [
+    cmd = [
         ffmpeg, "-y",
         "-f", "lavfi", "-i", "color=c=black:s=640x360:d=3",
-        "-vf", f"drawtext=text='{safe_text}':fontcolor=white:fontsize=24:x=(w-text_w)/2:y=(h-text_h)/2",
+        "-vf", f"drawtext=text='{safe_text}':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=(h-text_h)/2",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "24", "-an",
         output_path
     ]
     try:
-        subprocess.run(cmd1, check=True, capture_output=True)
-        return
+        subprocess.run(cmd, check=True, capture_output=True)
     except Exception:
-        # Fallback: color only (no drawtext)
-        cmd2 = [
+        # Fallback without drawtext
+        subprocess.run([
             ffmpeg, "-y",
             "-f", "lavfi", "-i", "color=c=black:s=640x360:d=3",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "24", "-an",
             output_path
-        ]
-        subprocess.run(cmd2, check=True, capture_output=True)
+        ], check=True, capture_output=True)
 
 
-def generate_merged_video(urls: List[str], output_path: str):
+def _build_video_plan(words: List[Dict[str, Any]], lookup_urls) -> List[Dict[str, Any]]:
     """
-    Download clips and concatenate into a single MP4.
-    Accepts mixed .mp4/.webm; limits to a sane number of clips to avoid very long videos.
+    Build a plan array like: [{"url": "...", "dur": 1.1}, ...]
+    Uses AssemblyAI word timings to proportion durations across 1..N clips/word.
     """
-    # Limit to avoid extremely long merges; adjust as needed
-    urls = [u for u in urls if isinstance(u, str) and u.strip()]
-    if not urls:
-        raise RuntimeError("No ASL clips available to merge.")
+    plan: List[Dict[str, Any]] = []
+    for w in words or []:
+        token = str(w.get("text", "")).strip()
+        if not token:
+            continue
+        start = int(w.get("start") or 0)
+        end = int(w.get("end") or 0)
+        dur_s = max((end - start) / 1000.0, 0.35)  # min per-word visibility
 
-    urls = urls[:20]  # cap
-    local_paths = _download_clips(urls)
-    if not local_paths:
-        raise RuntimeError("All ASL clip downloads failed.")
+        urls = lookup_urls(token) or []
+        if not urls:
+            continue
 
+        # share time across multiple clips for the same token
+        per = max(dur_s / len(urls), 0.25)
+        for u in urls:
+            plan.append({"url": u, "dur": per})
+
+    return plan
+
+
+def generate_merged_video(plan: List[Dict[str, Any]], output_path: str) -> None:
+    """
+    Download each planned clip and concat.
+    """
+    tmp_files: List[str] = []
     try:
-        _concat_with_filter(local_paths, output_path)
+        for item in plan:
+            url = item["url"]
+            dur = float(item["dur"])
+            try:
+                local = _download_media(url)  # mp4/webm/m3u8 -> local file
+                tmp_files.append(local)
+
+                # Optionally trim to target duration using ffmpeg (faster than reloading in MoviePy)
+                # Here we keep it simple and trim at concat stage via filter fps/scale; most clips are short.
+                # If precise trims are required, you can add per-clip trim here.
+
+            except Exception as e:
+                print(f"[download] skip {url}: {e}")
+
+        if not tmp_files:
+            raise RuntimeError("All ASL clip downloads failed.")
+
+        _concat_with_filter(tmp_files, output_path)
+
     finally:
-        for p in local_paths:
+        for p in tmp_files:
             try:
                 os.remove(p)
             except Exception:
                 pass
 
 
-# --------------------------- Worker entry ----------------------------
+# ----------------------------- Worker entry -------------------------------
 def process_audio_worker(
     job_id: str,
     audio_path: str,
     video_jobs: dict,
-    translate_text_to_sign,
+    translate_text_to_sign,  # callable: sentence -> list[str] (not used directly here)
     static_dir: str
-):
+) -> None:
     """
-    Background job runner. Expects translate_text_to_sign(text) -> list[str] of URLs.
-    Writes /videos/output_<job_id>.mp4 and updates video_jobs[job_id].
+    Background job runner.
+    - Transcribes audio
+    - Builds a per-word clip plan using the *word* timestamps and a word->URLs lookup
+      provided by main.py (e.g., one that uses Playwright to read signasl.org)
+    - Concats clips to /videos/output_<job_id>.mp4
+    - Updates video_jobs[job_id]
     """
     try:
         print(f"[{job_id}] transcribing…")
-        transcript = transcribe_with_assemblyai(audio_path)
-        print(f"[{job_id}] transcript: {transcript!r}")
+        data = transcribe_with_assemblyai(audio_path)
+        transcript = data.get("text", "")
+        words = data.get("words", []) or []
+        print(f"[{job_id}] transcript: {transcript!r} (words={len(words)})")
 
-        urls = translate_text_to_sign(transcript)
-        print(f"[{job_id}] fetched {len(urls)} ASL clip URLs")
+        # main.py should expose a function: lookup_sign_urls_for_word(word) -> list[str]
+        # for compatibility with your previous wiring, derive it from translate_text_to_sign:
+        def lookup_sign_urls_for_word(w: str) -> List[str]:
+            # translate_text_to_sign(sentence) returns a list for the whole sentence;
+            # for per-word, call with the word only.
+            try:
+                urls = translate_text_to_sign(w) or []
+                # Limit to prevent very long merges
+                return urls[:2]
+            except Exception:
+                return []
+
+        plan = _build_video_plan(words, lookup_sign_urls_for_word)
 
         out_path = os.path.join(static_dir, f"output_{job_id}.mp4")
-
-        if urls:
+        if plan:
             try:
-                generate_merged_video(urls, out_path)
+                generate_merged_video(plan, out_path)
             except Exception as merge_err:
-                # If concatenation fails (site blocked, mixed codecs, etc.), fall back to placeholder
                 print(f"[{job_id}] merge failed, generating placeholder: {merge_err}")
                 _placeholder_video(out_path, transcript)
         else:
-            # No URLs found at all → placeholder so UI still completes
+            # No clips at all → placeholder so the UI completes
             _placeholder_video(out_path, transcript)
 
         video_jobs[job_id] = {
@@ -241,7 +334,6 @@ def process_audio_worker(
         video_jobs[job_id] = {"status": "error", "error": str(e)}
 
     finally:
-        # Clean up uploaded audio
         try:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
