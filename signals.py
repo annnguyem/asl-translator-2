@@ -1,64 +1,176 @@
-# --- SignASL dynamic extractor (needs playwright) ----------------------------
+# signals.py
+"""
+SignASL clip finder.
+
+- fetch_signasl_urls(token)  -> list[str] of direct media URLs (mp4/webm/m3u8)
+- lookup_sign_urls_for_word(word) -> 1-2 good URLs for a word, else fingerspelling
+- translate_text_to_sign(sentence) -> URLs for a whole sentence
+
+Enable headless browser fallback by setting env: USE_BROWSER=1
+(Requires Playwright + Chromium installed in your deploy.)
+"""
+from __future__ import annotations
+
+import os
+import re
+import string
 from functools import lru_cache
-from playwright.sync_api import sync_playwright
-import re, time
+from urllib.parse import urljoin
+
+import requests
+
+
+# ------------------------- config -------------------------
+_SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
+_USE_BROWSER = os.getenv("USE_BROWSER", "0").lower() in ("1", "true", "yes")
+
 
 def _strip_punct(t: str) -> str:
-    import string
     return (t or "").translate(str.maketrans("", "", string.punctuation)).lower().strip()
 
-@lru_cache(maxsize=4096)
-def fetch_signasl_urls(token: str) -> list[str]:
-    """
-    Loads https://www.signasl.org/sign/<token> in a headless browser and returns
-    a de-duped list of direct video URLs (mp4/webm/hls).
-    """
+
+def _browser_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.signasl.org/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
+    return s
+
+
+# ------------------------- HTTP scrape (fast path) -------------------------
+def _fetch_signasl_urls_http(token: str) -> list[str]:
     token = _strip_punct(token)
     if not token:
         return []
 
-    url = f"https://www.signasl.org/sign/{token}"
-    vids: list[str] = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=15000)
-        page.wait_for_timeout(700)  # give their JS a hair to attach sources
+    sess = _browser_session()
+    found: list[str] = []
 
-        # 1) <video><source src> nodes
-        srcs = page.eval_on_selector_all("video source", "els => els.map(e => e.src || e.getAttribute('src'))")
-        # 2) <video src> / currentSrc as a fallback
-        vsrcs = page.eval_on_selector_all("video", "els => els.map(e => e.currentSrc || e.src || '')")
-        vids = [s for s in (srcs or []) + (vsrcs or []) if s]
+    # 1) JSON API (some tokens return a list of {video_url: ...})
+    for base in _SIGNASL_BASES:
+        api = urljoin(base, f"api/sign/{token}")
+        try:
+            rj = sess.get(api, timeout=8, allow_redirects=True)
+            if rj.ok:
+                data = rj.json()
+                if isinstance(data, list):
+                    for item in data:
+                        u = (item or {}).get("video_url")
+                        if u:
+                            found.append(u)
+        except Exception:
+            pass  # fall through to HTML
 
-        # Clean & de-dupe (prefer mp4/webm over HLS if both exist)
-        def score(u: str) -> int:
-            u = u.lower()
-            if u.endswith(".mp4"): return 3
-            if u.endswith(".webm"): return 2
-            if ".m3u8" in u: return 1
-            return 0
-        seen = set()
-        ordered = sorted((u for u in vids if u), key=score, reverse=True)
-        final = []
-        for u in ordered:
-            if u not in seen:
-                seen.add(u)
-                final.append(u)
+    # 2) HTML: look for mp4/webm/m3u8 declared in attributes or inline URLs
+    attr_re = re.compile(
+        r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
+        re.IGNORECASE,
+    )
+    abs_re = re.compile(r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b', re.IGNORECASE)
 
-        browser.close()
-        return final
+    for base in _SIGNASL_BASES:
+        page = urljoin(base, f"sign/{token}")
+        try:
+            rh = sess.get(page, timeout=12, allow_redirects=True)
+            if not rh.ok:
+                continue
+            html = rh.text
+            # relative paths from attributes
+            for m in attr_re.findall(html):
+                found.append(urljoin(base, m))
+            # absolute URLs
+            for m in abs_re.findall(html):
+                found.append(m)
+        except Exception:
+            pass
 
-def lookup_sign_urls_for_word(word: str) -> list[str]:
-    """Return 1–3 best clips for a word, else fall back to fingerspelling per-letter."""
-    urls = fetch_signasl_urls(word)
-    if urls:
-        # take a couple to avoid super long videos
-        return urls[:2]
-    # Fingerspelling fallback (keeps you off the caption-only path)
-    out = []
-    for ch in _strip_punct(word):
-        out += fetch_signasl_urls(ch)[:1]
-        if len(out) >= 6:  # cap
-            break
+    # de-dupe preserve order
+    seen, out = set(), []
+    for u in found:
+        if u not in seen:
+            out.append(u)
+            seen.add(u)
     return out
+
+
+# ------------------------- Browser scrape (fallback) -------------------------
+def _fetch_signasl_urls_browser(token: str) -> list[str]:
+    if not _USE_BROWSER:
+        return []
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception:
+        return []
+
+    token = _strip_punct(token)
+    if not token:
+        return []
+
+    out: list[str] = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                java_script_enabled=True,
+                ignore_https_errors=True,
+            )
+            page = ctx.new_page()
+            for base in _SIGNASL_BASES:
+                url = urljoin(base, f"sign/{token}")
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=20000)
+                    page.wait_for_timeout(600)  # give their JS a moment
+
+                    # Collect from <video> and <source>
+                    urls = page.eval_on_selector_all(
+                        "video, video source, source",
+                        """els => els.map(e => e.currentSrc || e.src || e.getAttribute('src') || e.getAttribute('data-src') || '')"""
+                    )
+                    for u in urls or []:
+                        if u:
+                            out.append(urljoin(base, u))
+                except Exception:
+                    continue
+            browser.close()
+    except Exception:
+        return []
+
+    # keep only media we can handle
+    media_re = re.compile(r'\.(mp4|webm|m3u8)(?:\?|$)', re.IGNORECASE)
+    out = [u for u in out if media_re.search(u)]
+
+    # de-dupe
+    seen, dedup = set(), []
+    for u in out:
+        if u not in seen:
+            dedup.append(u); seen.add(u)
+    return dedup
+
+
+# ------------------------- Public helpers -------------------------
+@lru_cache(maxsize=4096)
+def fetch_signasl_urls(token: str) -> list[str]:
+    """
+    Try HTTP scrape first; if none, try headless browser (when enabled).
+    """
+    urls = _fetch_signasl_urls_http(token)
+    if urls:
+        return urls
+    return _fetch_signasl_urls_browser(token)
+
+
+def lookup_sign_urls_for_word(word:
