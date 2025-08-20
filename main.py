@@ -284,17 +284,12 @@ async def translate_audio(data: AudioPayload):
 
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
-    logging.info("STATUS %s; known_jobs=%s", job_id, list(video_jobs.keys())[:10])
     job = video_jobs.get(job_id)
     if not job:
         return {"status": "not_found"}
     if job.get("status") == "ready":
         url = job.get("video_url") or f"/videos/output_{job_id}.mp4"
-        return {
-            "status": "ready",
-            "video_url": url,
-            "transcript": job.get("transcript", ""),
-        }
+        return {"status": "ready", "video_url": url, "transcript": job.get("transcript", "")}
     if job.get("status") == "error":
         return {"status": "error", "error": job.get("error")}
     return {"status": "processing"}
