@@ -86,10 +86,9 @@ def video_status(job_id: str):
     if not job:
         return {"status": "not_found"}
     if job.get("status") == "ready":
-        # ✅ return the single merged file URL
         return {
             "status": "ready",
-            "video_url": job.get("video_url"),
+            "video_url": job.get("video_url"),   # ← use singular
             "transcript": job.get("transcript", "")
         }
     if job.get("status") == "error":
