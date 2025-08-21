@@ -6,6 +6,7 @@ import uuid
 import string
 import logging
 import threading
+from functools import lru_cache
 from typing import Optional
 from urllib.parse import unquote, urljoin
 
