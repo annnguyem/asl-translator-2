@@ -240,64 +240,59 @@ def process_audio_worker(job_id: str,
                          video_jobs: dict,
                          translate_text_to_sign,
                          static_dir: str):
-    """
-    - Transcribe with AssemblyAI
-    - For each word, look up SignASL URLs and allocate durations from AAI timings
-    - Merge to /videos/output_<job_id>.mp4 (served by main.py)
-    - Update `video_jobs[job_id]`
-    """
     try:
         logging.info("🎬 [%s] start", job_id)
 
-        # 1) Transcription
+        # (A) Transcribe via AssemblyAI (your existing code)
         aai = transcribe_with_assemblyai(audio_path)
         transcript = aai.get("text", "") or ""
         words = aai.get("words", []) or []
         logging.info("🗣️ [%s] transcript len=%d, words=%d", job_id, len(transcript), len(words))
 
-        # 2) Build plan using word timings
+        # (B) Build your video plan (your existing code that looks up SignASL URLs)
         plan = []
         for w in words:
             text = (w.get("text") or "").strip()
             start = int(w.get("start", 0) or 0)
-            end = int(w.get("end", 0) or 0)
+            end   = int(w.get("end",   0) or 0)
             dur_s = max((end - start) / 1000.0, 0.12)
             if not text:
                 continue
-        
+
             urls = translate_text_to_sign(text) or []
             if not urls:
                 continue
-        
+
             if len(urls) == 1:
-                plan.append((urls[0], dur_s, text))   # <-- include token
+                plan.append((urls[0], dur_s, text))  # include token for referer (if you added that logic)
             else:
                 per = max(dur_s / len(urls), 0.08)
                 for u in urls:
-                    plan.append((u, per, text))       # <-- include token
+                    plan.append((u, per, text))
 
         if not plan:
-            # Hard fallback: try the whole sentence once (may find a generic clip)
-            try:
-                urls = translate_text_to_sign(transcript) or []
-            except Exception:
-                urls = []
-            for u in urls[:6]:
-                plan.append((u, 0.6))
-            if not plan:
-                raise RuntimeError("No ASL clips found")
+            # Option A: fail the job
+            raise RuntimeError("No ASL clips available to merge.")
+            # Option B (so you don't loop forever): mark ready with transcript-only
+            # video_jobs[job_id] = {"status":"ready","video_url":None,"transcript":transcript}
+            # _write_job(static_dir, job_id, video_jobs[job_id])
+            # return
 
-        # 3) Render final video
+        # (C) Render the MP4 (your generate_merged_video should handle HLS/webm/mp4)
         out_path = os.path.join(static_dir, f"output_{job_id}.mp4")
         generate_merged_video(plan, out_path)
 
         rel_url = f"/videos/output_{job_id}.mp4"
-        video_jobs[job_id] = {"status": "ready", "video_url": rel_url, "transcript": transcript}
+        payload = {"status": "ready", "video_url": rel_url, "transcript": transcript}
+        video_jobs[job_id] = payload
+        _write_job(static_dir, job_id, payload)   # <<< persist
         logging.info("✅ [%s] done, %s", job_id, rel_url)
 
     except Exception as e:
         logging.error("❌ [%s] failed: %s", job_id, e)
-        video_jobs[job_id] = {"status": "error", "error": str(e)}
+        payload = {"status": "error", "error": str(e)}
+        video_jobs[job_id] = payload
+        _write_job(static_dir, job_id, payload)   # <<< persist
     finally:
         try:
             if os.path.exists(audio_path):
