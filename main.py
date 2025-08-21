@@ -1,3 +1,4 @@
+# main.py
 import os
 import re
 import json
@@ -6,7 +7,6 @@ import uuid
 import string
 import logging
 import threading
-from functools import lru_cache
 from typing import Optional
 from urllib.parse import unquote, urljoin
 
@@ -80,12 +80,11 @@ def decode_data_uri(s: str) -> bytes:
         s += "=" * pad
     return base64.b64decode(s)
 
-# -------------------- Minimal SignASL scraper (HTTP only) --------------------
-_SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
-_USE_BROWSER = os.getenv("USE_BROWSER", "0").lower() in ("1", "true", "yes")
-
 def _strip_punct(t: str) -> str:
     return (t or "").translate(str.maketrans("", "", string.punctuation)).lower().strip()
+
+# -------------------- Minimal SignASL scraper (HTTP only) --------------------
+_SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
 
 def _browser_session() -> requests.Session:
     s = requests.Session()
@@ -153,104 +152,19 @@ def _fetch_signasl_urls_http(token: str) -> list[str]:
             out.append(u); seen.add(u)
     return out
 
-def _fetch_signasl_urls_browser(token: str) -> list[str]:
-    if not _USE_BROWSER:
-        return []
-    try:
-        from playwright.sync_api import sync_playwright  # lazy import
-    except Exception:
-        return []
-
-    token = _strip_punct(token)
-    if not token:
-        return []
-
-    hits: list[str] = []
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
-            ctx = browser.new_context(
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-                java_script_enabled=True,
-                ignore_https_errors=True,
-            )
-            page = ctx.new_page()
-
-            def on_response(resp):
-                try:
-                    url = resp.url
-                    if url.startswith("blob:"):
-                        return
-                    ct = (resp.headers or {}).get("content-type", "").lower()
-                    if (any(ext in url.lower() for ext in (".mp4", ".webm", ".m3u8"))
-                        or "video/" in ct or "mpegurl" in ct or "vnd.apple.mpegurl" in ct):
-                        hits.append(url)
-                except Exception:
-                    pass
-
-            page.on("response", on_response)
-
-            for base in _SIGNASL_BASES:
-                url = urljoin(base, f"sign/{token}")
-                try:
-                    page.goto(url, wait_until="networkidle", timeout=20000)
-                    page.wait_for_timeout(800)
-                    # read DOM sources as backup
-                    dom_urls = page.eval_on_selector_all(
-                        "video, video source, source",
-                        """els => els.map(e => (
-                            e.currentSrc || e.src || e.getAttribute('src') || e.getAttribute('data-src') || ''
-                        ))"""
-                    ) or []
-                    for u in dom_urls:
-                        if u and not u.startswith("blob:"):
-                            hits.append(urljoin(base, u))
-                except Exception:
-                    continue
-
-            browser.close()
-    except Exception:
-        return []
-
-    # keep only media
-    media_re = re.compile(r'\.(mp4|webm|m3u8)(?:\?|$)', re.IGNORECASE)
-    hits = [u for u in hits if media_re.search(u)]
-
-    # de-dupe preserve order
-    seen, out = set(), []
-    for u in hits:
-        if u not in seen:
-            out.append(u); seen.add(u)
-    return out
-
-@lru_cache(maxsize=4096)
-def fetch_signasl_urls(token: str) -> list[str]:
-    urls = _fetch_signasl_urls_http(token)
-    if urls:
-        return urls
-    return _fetch_signasl_urls_browser(token)
-
 def lookup_sign_urls_for_word(word: str) -> list[str]:
-    urls = fetch_signasl_urls(word)
+    urls = _fetch_signasl_urls_http(word)
     if urls:
-        return urls[:2]  # keep short per word
-    # fallback to fingerspelling some letters
+        return urls[:2]  # short per-word
+    # fallback to fingerspelling a few letters
     out: list[str] = []
     for ch in _strip_punct(word):
-        u = fetch_signasl_urls(ch)
+        u = _fetch_signasl_urls_http(ch)
         if u:
             out.append(u[0])
         if len(out) >= 6:
             break
     return out
-
-def translate_text_to_sign(sentence: str) -> list[str]:
-    tokens = _strip_punct(sentence).split()
-    result: list[str] = []
-    for t in tokens:
-        result += lookup_sign_urls_for_word(t)
-    return result
 
 def translate_text_to_sign(sentence: str) -> list[str]:
     tokens = _strip_punct(sentence).split()
