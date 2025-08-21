@@ -6,10 +6,22 @@ import shutil
 import logging
 import tempfile
 import subprocess
-
 import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+def _jobs_dir(static_dir: str) -> str:
+    d = os.path.join(static_dir, "jobs")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def _write_job(static_dir: str, job_id: str, payload: dict) -> None:
+    try:
+        p = os.path.join(_jobs_dir(static_dir), f"{job_id}.json")
+        with open(p, "w") as f:
+            json.dump(payload, f)
+    except Exception as e:
+        logging.warning("job write failed: %s", e)
 
 # ---------- AssemblyAI ----------
 def _get_aai_key() -> str:
