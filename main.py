@@ -1,27 +1,29 @@
 import os
-import re
+import io
+import string
 import base64
 import uuid
-import string
-import logging
+import multiprocessing
 import threading
-from urllib.parse import unquote, urljoin
 
-import requests
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# -------------------- Logging --------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from worker import process_audio_worker
 
-# -------------------- Static mount --------------------
+multiprocessing.set_start_method("spawn", force=True)
+
 STATIC_DIR = "static_output"
 os.makedirs(STATIC_DIR, exist_ok=True)
 
+# Serve the generated videos under /videos/...
 app = FastAPI()
+app.mount("/videos", StaticFiles(directory=STATIC_DIR), name="videos")
+
+# ── CORS ────────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,218 +31,73 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/videos", StaticFiles(directory=STATIC_DIR, html=False), name="videos")
 
-# In-memory job store (run ONE instance/worker)
-video_jobs = {}
+# In-memory job status storage
+manager = multiprocessing.Manager()
+video_jobs = manager.dict()
 
-# Feature flag: set USE_BROWSER=1 to enable Playwright fallback
-USE_BROWSER = os.getenv("USE_BROWSER", "0").lower() in ("1", "true", "yes")
-HAVE_PLAYWRIGHT = False
-if USE_BROWSER:
+# If you keep an inline key, also mirror it to env so worker sees it.
+ASSEMBLYAI_API_KEY = 'dbb3ea03ff1a43468beef535573eb703'
+os.environ["ASSEMBLYAI_API_KEY"] = ASSEMBLYAI_API_KEY
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+def strip_punctuation(text: str) -> str:
+    return text.translate(str.maketrans("", "", string.punctuation)).lower()
+
+import requests
+
+def get_asl_video_url(token: str):
     try:
-        from playwright.sync_api import sync_playwright  # type: ignore
-        HAVE_PLAYWRIGHT = True
-    except Exception as _e:
-        logging.warning("Playwright import failed (%s). Falling back to HTTP-only.", _e)
+        r = requests.get(f"https://signasl.org/api/sign/{token}", timeout=15)
+        r.raise_for_status()
+        results = r.json()
+        if results and isinstance(results, list):
+            return results[0].get("video_url")
+    except Exception as e:
+        print(f"❌ Failed to get video for '{token}': {e}")
+    return None
 
-# -------------------- Helpers --------------------
-def decode_data_uri(s):
-    s = (s or "").strip()
-    if s.startswith("data:"):
-        parts = s.split(",", 1)
-        s = parts[1] if len(parts) == 2 else ""
-    s = unquote(s)
-    s = s.replace("\n", "").replace("\r", "").replace(" ", "")
-    s = s.replace("-", "+").replace("_", "/")
-    s = re.sub(r"[^A-Za-z0-9+/=]", "", s)
-    pad = (4 - (len(s) % 4)) % 4
-    if pad:
-        s += "=" * pad
-    return base64.b64decode(s)
-
-def _strip_punct(t):
-    return t.translate(str.maketrans("", "", string.punctuation)).lower()
-
-_SIGNASL_BASES = ("https://www.signasl.org/", "https://signasl.org/")
-
-def _browser_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.signasl.org/",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    })
-    return s
-
-def _fetch_signasl_urls_http(token):
-    token = _strip_punct(token or "")
-    if not token:
-        return []
-
-    sess = _browser_session()
-    found = []
-
-    # 1) JSON API (if exposed)
-    for base in _SIGNASL_BASES:
-        url = urljoin(base, "api/sign/" + token)
-        try:
-            rj = sess.get(url, timeout=8, allow_redirects=True)
-            if rj.ok:
-                data = rj.json()
-                if isinstance(data, list):
-                    for item in data:
-                        u = (item or {}).get("video_url")
-                        if u:
-                            found.append(u)
-        except Exception as e:
-            logging.debug("JSON %s failed (%s): %s", url, token, e)
-
-    # 2) HTML scrape (supports mp4/webm/m3u8)
-    attr_re = re.compile(
-        r'(?:src|data-src|srcset|data-video|data-hls)=["\']([^"\']+?\.(?:mp4|webm|m3u8)(?:\?[^"\']*)?)["\']',
-        re.IGNORECASE,
-    )
-    abs_re = re.compile(
-        r'https?://[^\s"\'<>]+?\.(?:mp4|webm|m3u8)\b',
-        re.IGNORECASE,
-    )
-
-    for base in _SIGNASL_BASES:
-        page = urljoin(base, "sign/" + token)
-        try:
-            rh = sess.get(page, timeout=12, allow_redirects=True)
-            if not rh.ok:
-                continue
-            html = rh.text
-            for m in attr_re.findall(html):
-                found.append(urljoin(base, m))
-            for m in abs_re.findall(html):
-                found.append(m)
-        except Exception as e:
-            logging.debug("HTML %s failed (%s): %s", page, token, e)
-
-    # de-dupe, preserve order
-    seen, out = set(), []
-    for u in found:
-        if u not in seen:
-            out.append(u)
-            seen.add(u)
-    return out
-
-def _fetch_signasl_urls_browser(token):
-    if not (USE_BROWSER and HAVE_PLAYWRIGHT):
-        return []
-    token = _strip_punct(token or "")
-    if not token:
-        return []
+def translate_text_to_sign(sentence: str):
+    """
+    Returns a list of URLs for a sentence, falling back to fingerspelling
+    per letter when a whole-word sign isn't found.
+    """
+    clean = strip_punctuation(sentence)
+    words = clean.split()
 
     urls = []
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                java_script_enabled=True,
-                ignore_https_errors=True,
-            )
-            page = context.new_page()
-            for base in _SIGNASL_BASES:
-                url = urljoin(base, "sign/" + token)
-                try:
-                    page.goto(url, wait_until="networkidle", timeout=20000)
-                    # Collect src from <video> and <source> (including data-src)
-                    els = page.eval_on_selector_all(
-                        "video, video source, source",
-                        """els => els.map(e => (
-                            e.src || e.getAttribute('src') || e.getAttribute('data-src') || ''
-                        ))"""
-                    )
-                    for u in els or []:
-                        if u:
-                            # absolutize relative URLs
-                            urls.append(urljoin(base, u))
-                except Exception as e:
-                    logging.debug("Playwright goto failed %s: %s", url, e)
-            browser.close()
-    except Exception as e:
-        logging.warning("Playwright session failed: %s", e)
-        return []
-
-    # filter only media extensions we handle
-    media_re = re.compile(r'\.(mp4|webm|m3u8)(?:\?|$)', re.IGNORECASE)
-    urls = [u for u in urls if media_re.search(u)]
-
-    # de-dupe preserve order
-    seen, out = set(), []
-    for u in urls:
-        if u not in seen:
-            out.append(u); seen.add(u)
-    return out
-
-def _fetch_signasl_urls_for_token(token):
-    # Fast path: HTTP scrape
-    urls = _fetch_signasl_urls_http(token)
-    if urls:
-        return urls
-    # Slow path: headless browser (if enabled)
-    return _fetch_signasl_urls_browser(token)
-
-def translate_text_to_sign(sentence):
-    words = _strip_punct(sentence or "").split()
-    out = []
     for w in words:
-        hits = _fetch_signasl_urls_for_token(w)
-        if hits:
-            out.extend(hits)
-            continue
-        # fallback: letters
-        for ch in w:
-            hits_ch = _fetch_signasl_urls_for_token(ch)
-            if hits_ch:
-                out.extend(hits_ch)
-    return out
+        url = get_asl_video_url(w)
+        if url:
+            urls.append(url)
+        else:
+            for ch in w:
+                letter_url = get_asl_video_url(ch)
+                if letter_url:
+                    urls.append(letter_url)
+    return urls
 
-# -------------------- Schema --------------------
+# ── API ────────────────────────────────────────────────────────────────────────
 class AudioPayload(BaseModel):
     filename: str
-    content_base64: str  # data:...;base64,... or raw base64
+    content_base64: str
 
-# -------------------- Routes --------------------
 @app.post("/translate_audio/", status_code=200)
 async def translate_audio(data: AudioPayload):
     job_id = str(uuid.uuid4())
-    video_jobs[job_id] = {"status": "processing", "transcript": ""}
+    video_jobs[job_id] = {"status": "processing", "video_url": "", "transcript": ""}
 
-    try:
-        audio_bytes = decode_data_uri(data.content_base64)
-    except Exception:
-        video_jobs[job_id] = {"status": "error", "error": "Invalid base64"}
-        return JSONResponse(status_code=400, content={"status": "error", "error": "Invalid base64"})
-
-    ext = os.path.splitext(data.filename or "")[1].lower()
-    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".mp4"}:
-        ext = ".mp3"
-    temp_audio_path = "temp_%s%s" % (job_id, ext)
+    temp_audio_path = f"temp_{data.filename}"
+    audio_bytes = base64.b64decode(data.content_base64)
     with open(temp_audio_path, "wb") as f:
         f.write(audio_bytes)
 
-    from worker import process_audio_worker
+    print(f"📥 Received audio file: {data.filename}")
+
     threading.Thread(
         target=process_audio_worker,
         args=(job_id, temp_audio_path, video_jobs, translate_text_to_sign, STATIC_DIR),
-        daemon=True,
+        daemon=True
     ).start()
 
     return {"job_id": job_id}
@@ -248,43 +105,11 @@ async def translate_audio(data: AudioPayload):
 @app.get("/video_status/{job_id}")
 def video_status(job_id: str):
     job = video_jobs.get(job_id)
-    if not job:
-        return {"status": "not_found"}
-    if job.get("status") == "ready":
-        return {
-            "status": "ready",
-            "video_url": job.get("video_url"),
-            "transcript": job.get("transcript", ""),
-        }
-    if job.get("status") == "error":
-        return {"status": "error", "error": job.get("error")}
-    return {"status": "processing"}
+    if job:
+        return job
+    return {"status": "not_found"}
 
 @app.get("/")
-def health():
+def health_check():
+    print("✅ Health check OK")
     return {"status": "ok"}
-
-# -------------------- Optional debug endpoints --------------------
-@app.get("/debug_ffmpeg")
-def debug_ffmpeg():
-    import subprocess, shutil
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        try:
-            import imageio_ffmpeg
-            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
-            return JSONResponse(status_code=500, content={"ok": False, "error": "ffmpeg not found"})
-    out = os.path.join(STATIC_DIR, "ffmpeg_test.mp4")
-    cmd = [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=1",
-           "-c:v", "libx264", "-pix_fmt", "yuv420p", out]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return {"ok": True, "url": "/videos/ffmpeg_test.mp4", "size": os.path.getsize(out)}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
-
-@app.get("/debug_signasl/{token}")
-def debug_signasl(token: str):
-    urls = _fetch_signasl_urls_for_token(token)
-    return {"token": token, "count": len(urls), "urls": urls[:10], "use_browser": USE_BROWSER, "have_playwright": HAVE_PLAYWRIGHT}
