@@ -218,46 +218,42 @@ def process_audio_worker(job_id: str,
         logging.info("🗣️ [%s] transcript len=%d, words=%d", job_id, len(transcript), len(words))
 
         # 2) Build plan using word timings
+                # 2) Build a timed plan
         plan = []
-        for w in words:
-            text = (w.get("text") or "").strip()
-            try:
-                start = int(w.get("start", 0) or 0)
-                end = int(w.get("end", 0) or 0)
-            except Exception:
-                start, end = 0, 0
-            dur_s = max((end - start) / 1000.0, 0.12)  # min duration per token
+        if words:
+            prev_end_ms = words[0].get("start", 0)
+            for w in words:
+                text = (w.get("text") or "").strip().lower()
+                start_ms, end_ms = int(w.get("start", 0)), int(w.get("end", 0))
+                dur_s = max((end_ms - start_ms) / 1000.0, 0.12)
 
-            if not text:
-                continue
+                # gap before word
+                gap_ms = max(start_ms - prev_end_ms, 0)
+                if gap_ms > 0:
+                    plan.append(("gap", None, gap_ms / 1000.0))
 
-            # get URLs for this word (translate_text_to_sign splits tokens; ok for single token)
-            try:
                 urls = translate_text_to_sign(text) or []
-            except Exception as e:
-                logging.warning("lookup failed for '%s': %s", text, e)
-                urls = []
+                if not urls:
+                    # fallback: fingerspell
+                    for ch in text:
+                        letter_url = translate_text_to_sign(ch) or []
+                        if letter_url:
+                            plan.append(("clip", letter_url[0], dur_s / max(len(text), 1)))
+                    if not urls:  # still nothing
+                        plan.append(("gap", None, dur_s))
+                else:
+                    # normal case
+                    if len(urls) == 1:
+                        plan.append(("clip", urls[0], dur_s))
+                    else:
+                        per = max(dur_s / len(urls), 0.08)
+                        for u in urls:
+                            plan.append(("clip", u, per))
 
-            if not urls:
-                continue
-
-            if len(urls) == 1:
-                plan.append((urls[0], dur_s))
-            else:
-                per = max(dur_s / len(urls), 0.08)
-                for u in urls:
-                    plan.append((u, per))
+                prev_end_ms = end_ms
 
         if not plan:
-            # Hard fallback: try the whole sentence once (may find a generic clip)
-            try:
-                urls = translate_text_to_sign(transcript) or []
-            except Exception:
-                urls = []
-            for u in urls[:6]:
-                plan.append((u, 0.6))
-            if not plan:
-                raise RuntimeError("No ASL clips found")
+            raise RuntimeError("No ASL clips found even after fallback")
 
         # 3) Render final video
         out_path = os.path.join(static_dir, f"output_{job_id}.mp4")
